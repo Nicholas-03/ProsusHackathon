@@ -132,9 +132,6 @@ def suppliers_in_alerts(observation: dict[str, Any]) -> set[str]:
         name = supplier.get("name", "")
         if name and name.lower() in alerts:
             blocked.add(name)
-        if "mediterranean" in alerts or "shipping lane" in alerts:
-            if "italian" in name.lower() or "import" in name.lower():
-                blocked.add(name)
     return blocked
 
 
@@ -156,8 +153,8 @@ def best_supplier_for_ingredient(
         price = float(supplier["ingredients"][ingredient])
         eta = days_until_delivery(supplier, current_dow)
         reliability_penalty = 1.0 + (1.0 - reliability.get(name, 1.0)) * 0.35
-        alert_penalty = 40.0 if name in blocked_suppliers else 0.0
-        return (price * reliability_penalty + eta * 0.45 + alert_penalty, eta)
+        alert_penalty = 25.0 if name in blocked_suppliers else 0.0
+        return (price * reliability_penalty + eta * 0.12 + alert_penalty, eta)
 
     return min(candidates, key=score)
 

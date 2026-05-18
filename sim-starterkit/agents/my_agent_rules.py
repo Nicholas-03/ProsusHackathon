@@ -93,17 +93,13 @@ def _choose_staff_level(observation: dict[str, Any]) -> int:
     service = observation.get("service_summary") or {}
 
     if _is_renovation_capacity_limited(observation):
-        if dow == "Sunday":
-            return 5
         if dow in {"Friday", "Saturday", "Sunday"}:
             return 6
         return 5
-    if dow == "Sunday":
-        return 3
     if has_scenario_flag(observation, "renovation"):
         if dow == "Saturday":
             return 8
-        if dow == "Friday":
+        if dow in {"Friday", "Sunday"}:
             return 7
         return 6
 
@@ -159,8 +155,6 @@ def _choose_marketing_spend(observation: dict[str, Any], staff_level: int) -> in
     service = observation.get("service_summary") or {}
     walkouts = WALKOUT_PRESSURE.get(service.get("walkout_band", "None"), 0)
 
-    if dow == "Sunday":
-        return 0
     if walkouts >= 2 or staff_level <= 5:
         return 0
     if reputation in {"Poor", "Fair"}:
@@ -300,18 +294,6 @@ def _choose_planned_menu(
         ]
         return [dish for dish in preferred if dish in menu_book]
 
-    if has_scenario_flag(observation, "supply"):
-        preferred = [
-            "Pizza Margherita",
-            "Chicken Parmesan",
-            "Chicken Caesar Salad",
-            "Mushroom Risotto",
-            "Spaghetti Carbonara",
-            "Mushroom Tagliatelle",
-            "Grilled Salmon",
-        ]
-        return [dish for dish in preferred if dish in menu_book]
-
     return list(observation.get("active_menu") or active_from_book(menu_book))
 
 
@@ -405,11 +387,16 @@ def _order_actions(
                     order_candidates.append(alternate)
 
     order_candidates.sort(key=lambda item: (not item["urgent"], item["coverage_days"], item["cost"]))
-    optimized = optimize_order_candidates(order_candidates, budget)
+    optimized = None
+    if not has_scenario_flag(observation, "supply"):
+        optimized = optimize_order_candidates(order_candidates, budget)
     if optimized is not None:
         order_candidates = optimized
     else:
-        order_candidates = fallback_candidates
+        order_candidates = sorted(
+            fallback_candidates,
+            key=lambda item: (not item["urgent"], item["coverage_days"], item["cost"]),
+        )
 
     actions: list[dict[str, Any]] = []
     spent = 0.0
