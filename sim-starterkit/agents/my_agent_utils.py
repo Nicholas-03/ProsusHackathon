@@ -132,6 +132,9 @@ def suppliers_in_alerts(observation: dict[str, Any]) -> set[str]:
         name = supplier.get("name", "")
         if name and name.lower() in alerts:
             blocked.add(name)
+        if "mediterranean" in alerts or "shipping lane" in alerts:
+            if "italian" in name.lower() or "import" in name.lower():
+                blocked.add(name)
     return blocked
 
 
@@ -153,8 +156,8 @@ def best_supplier_for_ingredient(
         price = float(supplier["ingredients"][ingredient])
         eta = days_until_delivery(supplier, current_dow)
         reliability_penalty = 1.0 + (1.0 - reliability.get(name, 1.0)) * 0.35
-        alert_penalty = 25.0 if name in blocked_suppliers else 0.0
-        return (price * reliability_penalty + eta * 0.12 + alert_penalty, eta)
+        alert_penalty = 40.0 if name in blocked_suppliers else 0.0
+        return (price * reliability_penalty + eta * 0.45 + alert_penalty, eta)
 
     return min(candidates, key=score)
 
@@ -173,7 +176,9 @@ def make_notes(observation: dict[str, Any], staff_level: int, marketing_spend: i
         f"staff={staff_level}; marketing={marketing_spend}; "
         f"covers_yday={service.get('total_covers', 0)}; "
         f"walkouts={service.get('walkout_band', 'n/a')}; "
-        f"stockouts={','.join(stockouts.keys()) if stockouts else 'none'}"
+        f"stockouts={','.join(stockouts.keys()) if stockouts else 'none'}; "
+        f"pending={len(observation.get('pending_orders', []))}; "
+        f"alerts={len(observation.get('alerts', []))}"
         f"{scenario_note}"
         f"{llm_note}"
     )
@@ -191,7 +196,14 @@ def _scenario_note(observation: dict[str, Any]) -> str:
     lowered = text.lower()
     if "renovation" in lowered:
         return "; scenario=renovation"
-    if "supply" in lowered or "supplier" in lowered or "outage" in lowered:
+    if (
+        "supply" in lowered
+        or "supplier" in lowered
+        or "outage" in lowered
+        or "disruption" in lowered
+        or "shipping lane" in lowered
+        or "mediterranean" in lowered
+    ):
         return "; scenario=supply"
     if "tourist" in lowered or "festival" in lowered:
         return "; scenario=tourist"

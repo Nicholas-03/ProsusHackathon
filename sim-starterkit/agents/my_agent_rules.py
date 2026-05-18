@@ -93,13 +93,17 @@ def _choose_staff_level(observation: dict[str, Any]) -> int:
     service = observation.get("service_summary") or {}
 
     if _is_renovation_capacity_limited(observation):
+        if dow == "Sunday":
+            return 5
         if dow in {"Friday", "Saturday", "Sunday"}:
             return 6
         return 5
+    if dow == "Sunday":
+        return 3
     if has_scenario_flag(observation, "renovation"):
         if dow == "Saturday":
             return 8
-        if dow in {"Friday", "Sunday"}:
+        if dow == "Friday":
             return 7
         return 6
 
@@ -155,6 +159,8 @@ def _choose_marketing_spend(observation: dict[str, Any], staff_level: int) -> in
     service = observation.get("service_summary") or {}
     walkouts = WALKOUT_PRESSURE.get(service.get("walkout_band", "None"), 0)
 
+    if dow == "Sunday":
+        return 0
     if walkouts >= 2 or staff_level <= 5:
         return 0
     if reputation in {"Poor", "Fair"}:
@@ -291,6 +297,18 @@ def _choose_planned_menu(
             "Chicken Caesar Salad",
             "Mushroom Risotto",
             "Spaghetti Carbonara",
+        ]
+        return [dish for dish in preferred if dish in menu_book]
+
+    if has_scenario_flag(observation, "supply"):
+        preferred = [
+            "Pizza Margherita",
+            "Chicken Parmesan",
+            "Chicken Caesar Salad",
+            "Mushroom Risotto",
+            "Spaghetti Carbonara",
+            "Mushroom Tagliatelle",
+            "Grilled Salmon",
         ]
         return [dish for dish in preferred if dish in menu_book]
 

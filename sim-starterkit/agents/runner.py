@@ -13,16 +13,13 @@ Each dict in the list is a tool call: {"tool": "place_order", "args": {...}}
 
 from __future__ import annotations
 
-import json
 import os
-import sys
-import time
 from pathlib import Path
 from typing import Callable
 
 import httpx
 
-from agents.run_logging import append_jsonl, make_log_path, summarize_observation
+from agents.run_logging import append_jsonl, make_log_path, summarize_actions, summarize_observation
 
 Strategy = Callable[[dict, int], list[dict]]
 
@@ -106,7 +103,13 @@ def run_game(
 
         for turn in range(30):
             tool_calls = strategy(observation, day)
-            append_jsonl(log_path, "actions_planned", day=day, actions=tool_calls)
+            append_jsonl(
+                log_path,
+                "actions_planned",
+                day=day,
+                actions=tool_calls,
+                decision_summary=summarize_actions(observation, tool_calls),
+            )
 
             accepted = 0
             rejected = 0

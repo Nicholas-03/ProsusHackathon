@@ -115,6 +115,16 @@ def _run_one_attempt(
                 detail=detail,
             )
             return _empty_result(scenario, seed, "unavailable", None, detail)
+        if status_code == 429:
+            print(f"  SKIPPED ({scenario} seed={seed}): rate limited - {detail}")
+            append_jsonl(
+                make_log_path(team_name, scenario, seed),
+                "game_rate_limited",
+                scenario=scenario,
+                seed=seed,
+                detail=detail,
+            )
+            return _empty_result(scenario, seed, "rate_limited", None, detail)
 
         print(f"  FAILED ({scenario} seed={seed}): {detail or e}")
         append_jsonl(
@@ -259,6 +269,7 @@ def print_report(data: dict, team_name: str, seeds: list[int]) -> None:
     bankrupt_count = sum(1 for r in results if r["status"] == "bankrupt")
     error_count = sum(1 for r in results if r["status"] == "error")
     unavailable_count = sum(1 for r in results if r["status"] == "unavailable")
+    rate_limited_count = sum(1 for r in results if r["status"] == "rate_limited")
 
     print(f"\n{'-' * 60}")
     print(f"  Games played:    {len(all_scores)}")
@@ -267,6 +278,8 @@ def print_report(data: dict, team_name: str, seeds: list[int]) -> None:
         print(f"  Errors:          {error_count}")
     if unavailable_count:
         print(f"  Unavailable:     {unavailable_count}")
+    if rate_limited_count:
+        print(f"  Rate limited:    {rate_limited_count}")
     print(f"  Average score:   {avg_score:,.0f}")
     if scenario_totals:
         print(f"  Best scenario:   {max(scenario_totals, key=lambda s: sum(scenario_totals[s]) / len(scenario_totals[s]))}")
