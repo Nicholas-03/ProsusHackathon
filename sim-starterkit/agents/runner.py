@@ -17,11 +17,38 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Callable
 
 import httpx
 
 Strategy = Callable[[dict, int], list[dict]]
+
+
+def _load_dotenv() -> None:
+    """Load simple KEY=VALUE pairs from the nearest .env file, if present."""
+    candidates: list[Path] = []
+    for start in (Path.cwd(), Path(__file__).resolve().parent):
+        candidates.extend(parent / ".env" for parent in (start, *start.parents))
+
+    seen: set[Path] = set()
+    for path in candidates:
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if not key or any(char.isspace() for char in key):
+                continue
+            os.environ.setdefault(key, value.strip().strip('"').strip("'"))
+        return
+
+
+_load_dotenv()
 
 DEFAULT_URL = os.getenv("RESTBENCH_URL", "http://localhost:8001")
 
