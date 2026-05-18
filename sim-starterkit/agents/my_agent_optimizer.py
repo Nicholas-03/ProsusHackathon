@@ -83,8 +83,19 @@ def _candidate_value(item: dict[str, Any]) -> int:
     stockout_bonus = 8_000 if item.get("stockout") else 0
     urgent_bonus = 3_000 if item.get("urgent") else 0
     lead_bonus = max(0.0, 4.0 - eta_days) * 250.0
+    late_penalty = max(0.0, eta_days - coverage_days - 0.5) * 900.0
+    timely_bonus = max(0.0, coverage_days + 1.0 - eta_days) * 220.0
     volume_bonus = min(need_per_day, 30.0) * 30.0
     cost_penalty = cost * 2.0
 
-    value = stockout_bonus + urgent_bonus + coverage_gap * 1_500.0 + lead_bonus + volume_bonus - cost_penalty
+    value = (
+        stockout_bonus
+        + urgent_bonus
+        + coverage_gap * 1_500.0
+        + lead_bonus
+        + timely_bonus
+        + volume_bonus
+        - late_penalty
+        - cost_penalty
+    )
     return max(1, int(round(value)))
