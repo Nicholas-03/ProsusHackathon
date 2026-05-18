@@ -176,10 +176,16 @@ def round_order_qty(qty: float) -> float:
     return round(ceil(qty * 2) / 2, 1)
 
 
-def make_notes(observation: dict[str, Any], staff_level: int, marketing_spend: int, llm_used: bool = False) -> str:
+def make_notes(
+    observation: dict[str, Any],
+    staff_level: int,
+    marketing_spend: int,
+    llm_used: bool = False,
+    llm_status: str | None = None,
+) -> str:
     service = observation.get("service_summary") or {}
     stockouts = service.get("dishes_unavailable_at") or {}
-    llm_note = "; llm=used" if llm_used else ""
+    llm_note = f"; llm={llm_status}" if llm_status else ("; llm=used" if llm_used else "")
     scenario_note = _scenario_note(observation)
     return (
         f"Day {observation.get('day')}: cash={float(observation.get('cash', 0)):.0f}; "

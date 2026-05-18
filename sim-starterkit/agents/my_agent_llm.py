@@ -12,6 +12,7 @@ import os
 from typing import Any
 
 from agents.my_agent_config import (
+    LLM_ALLOW_CHAT_FALLBACK,
     LLM_AUDIT_EVERY_DAYS,
     LLM_BASE_URL,
     LLM_MAX_TOKENS,
@@ -80,11 +81,11 @@ def refine_actions_with_llm(
         proposed = _call_llm(observation, day, rule_actions, api_key)
         accepted = _validate_llm_actions(observation, rule_actions, proposed)
         if not accepted:
-            return rule_actions
-        return _merge_actions(observation, rule_actions, accepted, llm_used=True)
+            return _merge_actions(observation, rule_actions, [], llm_status="checked")
+        return _merge_actions(observation, rule_actions, accepted, llm_status="used")
     except Exception as exc:
         print(f"  LLM advisory skipped on day {day}: {exc}")
-        return rule_actions
+        return _merge_actions(observation, rule_actions, [], llm_status="error")
 
 
 def _should_consult_llm(observation: dict[str, Any], day: int) -> bool:
@@ -93,22 +94,21 @@ def _should_consult_llm(observation: dict[str, Any], day: int) -> bool:
 
     service = observation.get("service_summary") or {}
     walkouts = WALKOUT_PRESSURE.get(service.get("walkout_band", "None"), 0)
-    stock = stock_by_ingredient(observation, min_expires_in_days=1)
-    low_fresh_stock = any(qty < 5.0 for qty in stock.values())
+    avg_wait = float(service.get("avg_wait_minutes") or 0)
+    peak_wait = float(service.get("peak_wait_minutes") or 0)
     scenario_text = " ".join(str(alert) for alert in observation.get("alerts", []))
     scenario_text += " " + str(observation.get("notes", ""))
     stress_scenario = any(token in scenario_text.lower() for token in ("supply", "renovation", "tourist"))
     periodic_audit = LLM_AUDIT_EVERY_DAYS > 0 and day % LLM_AUDIT_EVERY_DAYS == 0
 
     return any([
-        day <= 3,
+        day == 1,
         bool(observation.get("alerts")),
         observation.get("reputation_band") == "Poor",
         observation.get("customer_trend") == "Declining",
         bool(service.get("dishes_unavailable_at")),
-        low_fresh_stock and bool(observation.get("pending_orders")),
         stress_scenario and periodic_audit,
-        observation.get("day_of_week") in {"Friday", "Saturday"} and walkouts >= 1,
+        walkouts >= 3 and (avg_wait > 8 or peak_wait > 20),
         float(observation.get("cash", 0)) < 4_000,
     ])
 
@@ -136,6 +136,8 @@ def _call_llm(
         )
         content = _response_text(response) or "[]"
     except Exception:
+        if not LLM_ALLOW_CHAT_FALLBACK:
+            raise
         response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[
@@ -271,7 +273,16 @@ def _validate_llm_actions(
         for ingredient in menu_book.get(dish_name, {}).get("ingredients", [])
     }
     already_pending = pending_by_ingredient_within(observation, 4.0)
+    fresh_stock = stock_by_ingredient(observation, min_expires_in_days=1)
     rule_staff = _effective_staff_level(observation, rule_actions)
+    rule_special = next(
+        (
+            action.get("args", {}).get("dish")
+            for action in rule_actions
+            if action.get("tool") == "offer_daily_special"
+        ),
+        None,
+    )
     walkouts = WALKOUT_PRESSURE.get(service.get("walkout_band", "None"), 0)
     already_ordered = {
         action.get("args", {}).get("ingredient")
@@ -291,8 +302,12 @@ def _validate_llm_actions(
 
         if tool == "set_staff_level":
             level = _as_int(args.get("level"))
-            if level is not None and 5 <= level <= 12 and level >= rule_staff - 1:
-                if walkouts >= 2 and level < rule_staff:
+            if level is not None and 5 <= level <= 12:
+                if level < rule_staff:
+                    continue
+                if level > rule_staff + 1 and walkouts < 3:
+                    continue
+                if rule_staff <= 5 and level > 6:
                     continue
                 accepted.append({"tool": tool, "args": {"level": level}})
 
@@ -309,6 +324,8 @@ def _validate_llm_actions(
 
         elif tool == "offer_daily_special":
             dish = args.get("dish")
+            if rule_special:
+                continue
             if dish in menu_names and (not active_menu or dish in active_menu):
                 accepted.append({"tool": tool, "args": {"dish": dish}})
 
@@ -320,6 +337,8 @@ def _validate_llm_actions(
             if not supplier or ingredient not in supplier.get("ingredients", {}) or qty is None:
                 continue
             if ingredient in already_ordered:
+                continue
+            if ingredient not in stockout_ingredient_names and fresh_stock.get(ingredient, 0.0) > 1.0:
                 continue
             if ingredient in already_pending and ingredient not in stockout_ingredient_names:
                 continue
@@ -350,7 +369,7 @@ def _merge_actions(
     rule_actions: list[dict[str, Any]],
     llm_actions: list[dict[str, Any]],
     *,
-    llm_used: bool,
+    llm_status: str,
 ) -> list[dict[str, Any]]:
     actions = [action for action in rule_actions if action.get("tool") != "save_notes"]
 
@@ -366,7 +385,7 @@ def _merge_actions(
     marketing_spend = _effective_marketing_spend(actions)
     actions.append({
         "tool": "save_notes",
-        "args": {"text": make_notes(observation, staff_level, marketing_spend, llm_used=llm_used)},
+        "args": {"text": make_notes(observation, staff_level, marketing_spend, llm_status=llm_status)},
     })
     return actions
 

@@ -12,10 +12,16 @@ LLM_BASE_URL = (
     or os.getenv("AGENT_OPENAI_BASE_URL")
     or "https://api.openai.com/v1"
 )
-LLM_TIMEOUT_SECONDS = float(os.getenv("MY_AGENT_LLM_TIMEOUT_SECONDS", "18"))
+LLM_TIMEOUT_SECONDS = float(os.getenv("MY_AGENT_LLM_TIMEOUT_SECONDS", "6"))
 LLM_MAX_TOKENS = int(os.getenv("MY_AGENT_LLM_MAX_TOKENS", "1200"))
 LLM_REASONING_EFFORT = os.getenv("MY_AGENT_LLM_REASONING_EFFORT", "medium")
-LLM_AUDIT_EVERY_DAYS = int(os.getenv("MY_AGENT_LLM_AUDIT_EVERY_DAYS", "3"))
+LLM_AUDIT_EVERY_DAYS = int(os.getenv("MY_AGENT_LLM_AUDIT_EVERY_DAYS", "0"))
+LLM_ALLOW_CHAT_FALLBACK = os.getenv("MY_AGENT_LLM_ALLOW_CHAT_FALLBACK", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 USE_LLM = os.getenv("MY_AGENT_USE_LLM", "1").strip().lower() not in {"0", "false", "no", "off"}
 
