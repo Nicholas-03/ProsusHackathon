@@ -24,6 +24,7 @@ from agents.my_agent_utils import (
     cheapest_supplier_by_ingredient,
     days_until_delivery,
     estimated_margin,
+    has_scenario_flag,
     make_notes,
     pending_by_ingredient,
     round_order_qty,
@@ -50,7 +51,7 @@ def build_rule_actions(
     actions: list[dict[str, Any]] = []
 
     menu_book = {dish["name"]: dish for dish in observation.get("menu_book", [])}
-    active_menu = list(observation.get("active_menu") or active_from_book(menu_book))
+    active_menu = _choose_planned_menu(observation, menu_book)
     active_menu = _choose_safe_menu(observation, menu_book, active_menu)
 
     if not same_items(active_menu, observation.get("active_menu", [])) and len(active_menu) >= 5:
@@ -89,6 +90,17 @@ def _choose_staff_level(observation: dict[str, Any]) -> int:
     trend = observation.get("customer_trend", "Stable")
     reputation = observation.get("reputation_band", "Very Good")
     service = observation.get("service_summary") or {}
+
+    if _is_renovation_capacity_limited(observation):
+        if dow in {"Friday", "Saturday", "Sunday"}:
+            return 6
+        return 5
+    if has_scenario_flag(observation, "renovation"):
+        if dow == "Saturday":
+            return 8
+        if dow in {"Friday", "Sunday"}:
+            return 7
+        return 6
 
     if dow == "Saturday":
         level = 9
@@ -133,6 +145,8 @@ def _choose_marketing_spend(observation: dict[str, Any], staff_level: int) -> in
     cash = float(observation.get("cash", 0))
     if cash < 3_000:
         return 0
+    if has_scenario_flag(observation, "renovation"):
+        return 0
 
     dow = observation.get("day_of_week", "")
     trend = observation.get("customer_trend", "Stable")
@@ -163,9 +177,12 @@ def _price_actions(
     walkouts = WALKOUT_PRESSURE.get(service.get("walkout_band", "None"), 0)
     stockouts = bool(service.get("dishes_unavailable_at") or {})
 
-    multiplier = REPUTATION_PRICE_MULTIPLIER.get(reputation, 1.0)
+    if _is_renovation_capacity_limited(observation):
+        multiplier = 1.20
+    else:
+        multiplier = REPUTATION_PRICE_MULTIPLIER.get(reputation, 1.0)
     if walkouts >= 2 or stockouts:
-        multiplier = min(multiplier, 1.00)
+        multiplier = min(multiplier, 1.00) if not _is_renovation_capacity_limited(observation) else multiplier
 
     actions: list[dict[str, Any]] = []
     for dish_name in active_menu:
@@ -186,6 +203,8 @@ def _price_actions(
 def _should_run_happy_hour(observation: dict[str, Any]) -> bool:
     cash = float(observation.get("cash", 0))
     if cash < 3_500:
+        return False
+    if has_scenario_flag(observation, "renovation"):
         return False
 
     dow = observation.get("day_of_week", "")
@@ -258,6 +277,28 @@ def _choose_safe_menu(
     if len(safe) >= 5:
         return safe
     return active_menu
+
+
+def _choose_planned_menu(
+    observation: dict[str, Any],
+    menu_book: dict[str, dict[str, Any]],
+) -> list[str]:
+    if has_scenario_flag(observation, "renovation"):
+        preferred = [
+            "Pizza Margherita",
+            "Chicken Parmesan",
+            "Chicken Caesar Salad",
+            "Mushroom Risotto",
+            "Spaghetti Carbonara",
+        ]
+        return [dish for dish in preferred if dish in menu_book]
+
+    return list(observation.get("active_menu") or active_from_book(menu_book))
+
+
+def _is_renovation_capacity_limited(observation: dict[str, Any]) -> bool:
+    day = int(observation.get("day") or 1)
+    return day <= 14 and has_scenario_flag(observation, "renovation")
 
 
 def _order_actions(
@@ -365,6 +406,8 @@ def _project_daily_ingredient_need(
         for ingredient in dish.get("ingredients", []):
             need[ingredient["ingredient"]] += projected_portions * float(ingredient["quantity_kg"])
 
+    if has_scenario_flag(observation, "renovation"):
+        return {ingredient: qty * 1.35 for ingredient, qty in need.items()}
     return dict(need)
 
 
@@ -419,5 +462,8 @@ def expected_covers_for_day(observation: dict[str, Any]) -> float:
     if yesterday >= 20:
         estimate = max(estimate, yesterday * 0.85)
         estimate = min(estimate, yesterday * 1.35)
+
+    if has_scenario_flag(observation, "renovation"):
+        estimate = max(estimate, 115.0)
 
     return max(55.0, min(170.0, estimate))

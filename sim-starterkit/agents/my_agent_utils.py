@@ -167,11 +167,32 @@ def make_notes(observation: dict[str, Any], staff_level: int, marketing_spend: i
     service = observation.get("service_summary") or {}
     stockouts = service.get("dishes_unavailable_at") or {}
     llm_note = "; llm=used" if llm_used else ""
+    scenario_note = _scenario_note(observation)
     return (
         f"Day {observation.get('day')}: cash={float(observation.get('cash', 0)):.0f}; "
         f"staff={staff_level}; marketing={marketing_spend}; "
         f"covers_yday={service.get('total_covers', 0)}; "
         f"walkouts={service.get('walkout_band', 'n/a')}; "
         f"stockouts={','.join(stockouts.keys()) if stockouts else 'none'}"
+        f"{scenario_note}"
         f"{llm_note}"
     )
+
+
+def has_scenario_flag(observation: dict[str, Any], flag: str) -> bool:
+    text = " ".join(str(alert) for alert in observation.get("alerts", []))
+    text += " " + str(observation.get("notes", ""))
+    return flag.lower() in text.lower()
+
+
+def _scenario_note(observation: dict[str, Any]) -> str:
+    text = " ".join(str(alert) for alert in observation.get("alerts", []))
+    text += " " + str(observation.get("notes", ""))
+    lowered = text.lower()
+    if "renovation" in lowered:
+        return "; scenario=renovation"
+    if "supply" in lowered or "supplier" in lowered or "outage" in lowered:
+        return "; scenario=supply"
+    if "tourist" in lowered or "festival" in lowered:
+        return "; scenario=tourist"
+    return ""

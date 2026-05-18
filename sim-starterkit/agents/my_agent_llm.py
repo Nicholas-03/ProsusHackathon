@@ -218,7 +218,7 @@ def _validate_llm_actions(
 
         if tool == "set_staff_level":
             level = _as_int(args.get("level"))
-            if level is not None and 3 <= level <= 15:
+            if level is not None and 5 <= level <= 12:
                 accepted.append({"tool": tool, "args": {"level": level}})
 
         elif tool == "set_marketing_spend":
