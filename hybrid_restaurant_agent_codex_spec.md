@@ -202,7 +202,7 @@ These are the only technologies Codex should require for the scoring agent. The 
 | Area                   | Technology                              | Use in this project                                      | Why it matters                                                |
 | ---------------------- | --------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------- |
 | Language               | **Python 3.11 or 3.12**                 | Entire agent implementation                              | Matches starter kit and VM setup                              |
-| Package/env management | **venv + pip**                          | Simple VM setup                                          | Lowest friction for hackathon and evaluator compatibility     |
+| Package/env management | **venv + UV**                           | Simple VM setup                                          | Lowest friction for hackathon and evaluator compatibility     |
 | Data models            | **standard-library dataclasses**        | `GameState`, `Metrics`, `RiskAssessment`, `StrategyPlan` | Strong typing without extra runtime dependency                |
 | Parsing/serialization  | **json**                                | Notes, optional logs, LLM plan parsing                   | Already available and reliable                                |
 | Numeric computation    | **plain Python math/statistics**        | EMAs, forecasts, clamps, scoring proxies                 | Enough for online control inside `strategy`                   |
