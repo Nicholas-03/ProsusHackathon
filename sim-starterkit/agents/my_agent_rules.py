@@ -1,607 +1,349 @@
-"""Deterministic rule layer for the RestBench agent.
-
-The rules are the reliable fallback: they make complete daily decisions without
-needing a model call. The LLM layer can add bounded adjustments on top.
-"""
+"""Deterministic EOQ-based strategy for the RestBench restaurant game."""
 
 from __future__ import annotations
 
-from collections import defaultdict
 from typing import Any
 
 from agents.my_agent_config import (
-    BASE_COVERS_BY_DAY,
-    BUSY_DAYS,
-    DEFAULT_SHELF_LIFE_DAYS,
-    REPUTATION_PRICE_MULTIPLIER,
-    SLOW_DAYS,
-    SUPPLY_SHELF_LIFE_DAYS,
-    TREND_DEMAND,
-    WALKOUT_PRESSURE,
-    WEEKDAYS,
-    WEATHER_DEMAND,
+    EMERGENCY_CASH_RESERVE,
+    FIXED_DAILY_COST,
+    MAX_ORDER_BUDGET_FRACTION,
+    MIN_CASH_RESERVE,
+    STAFF_COST,
 )
 from agents.my_agent_inventory import (
-    eoq_nonconstant_demand,
-    holding_cost_per_day,
-    setup_cost_for_order,
-)
-from agents.my_agent_optimizer import optimize_order_candidates
-from agents.my_agent_utils import (
-    active_from_book,
-    best_supplier_for_ingredient,
-    cheapest_supplier_by_ingredient,
-    days_until_delivery,
-    estimated_margin,
-    has_scenario_flag,
-    make_notes,
+    best_supplier,
+    build_supplier_options,
+    dish_unit_cost,
+    eoq_piecewise,
     pending_by_ingredient,
-    pending_by_ingredient_within,
-    round_order_qty,
-    same_items,
-    servings_available,
+    pending_due_by_ingredient,
+    recipe_ingredients,
+    shelf_life_by_ingredient,
     stock_by_ingredient,
-    stockout_ingredients,
 )
+from agents.my_agent_optimizer import (
+    choose_marketing,
+    choose_menu,
+    choose_special,
+    choose_staff_level,
+    dish_shares,
+    estimate_covers,
+    price_for_dish,
+    service_stress,
+    should_run_happy_hour,
+    update_state_after_plan,
+)
+from agents.my_agent_utils import clamp, read_notes, round_kg, safe_float, safe_int, tool_call, write_notes
 
 
-def strategy(observation: dict[str, Any], day: int) -> list[dict[str, Any]]:
-    """Compatibility entrypoint used by the evaluator if imported directly."""
-    return build_rule_actions(observation, day)
+def build_rule_actions(observation: dict[str, Any], day: int) -> list[dict[str, Any]]:
+    del day
+    state = read_notes(observation.get("notes"))
+    supplier_options = build_supplier_options(observation)
+    stock = stock_by_ingredient(observation, min_expires_in_days=1)
+    total_stock = stock_by_ingredient(observation, min_expires_in_days=0)
+    pending = pending_by_ingredient(observation)
+    shelf_life = shelf_life_by_ingredient(observation)
 
+    menu = choose_menu(observation, state, supplier_options, stock, pending)
+    expected_covers = estimate_covers(observation, state)
+    shares = dish_shares(observation, menu, state)
+    stress = service_stress(observation)
+    ingredient_forecast = forecast_ingredients(observation, menu, shares, state)
+    ingredient_daily = {ingredient: values[0] for ingredient, values in ingredient_forecast.items()}
 
-def build_rule_actions(
-    observation: dict[str, Any],
-    day: int,
-    *,
-    include_notes: bool = True,
-    llm_used: bool = False,
-) -> list[dict[str, Any]]:
-    """Return the deterministic baseline actions for today."""
+    staff_level = choose_staff_level(observation, expected_covers)
+    inventory_days = estimate_inventory_days(menu, observation, total_stock, pending, ingredient_daily)
+    marketing = choose_marketing(observation, expected_covers, stress, inventory_days)
+    special = choose_special(observation, menu, supplier_options, total_stock, pending)
+
     actions: list[dict[str, Any]] = []
+    if menu and _menu_changed(menu, observation.get("active_menu", [])):
+        actions.append(tool_call("set_menu", dishes=menu))
 
-    menu_book = {dish["name"]: dish for dish in observation.get("menu_book", [])}
-    active_menu = _choose_planned_menu(observation, menu_book)
-    active_menu = _choose_safe_menu(observation, menu_book, active_menu)
+    if staff_level != safe_int(observation.get("staff_level"), staff_level):
+        actions.append(tool_call("set_staff_level", level=staff_level))
 
-    if not same_items(active_menu, observation.get("active_menu", [])) and len(active_menu) >= 5:
-        actions.append({"tool": "set_menu", "args": {"dishes": active_menu}})
+    actions.extend(price_actions(observation, menu, supplier_options, stress))
+    actions.extend(order_actions(observation, menu, supplier_options, total_stock, pending, shelf_life, ingredient_forecast, staff_level, marketing))
 
-    staff_level = _choose_staff_level(observation)
-    if staff_level != observation.get("staff_level"):
-        actions.append({"tool": "set_staff_level", "args": {"level": staff_level}})
+    if marketing > 0:
+        actions.append(tool_call("set_marketing_spend", amount=marketing))
+    elif safe_float((observation.get("cost_breakdown") or {}).get("marketing")) > 0:
+        actions.append(tool_call("set_marketing_spend", amount=0.0))
 
-    marketing_spend = _choose_marketing_spend(observation, staff_level)
-    actions.append({"tool": "set_marketing_spend", "args": {"amount": marketing_spend}})
-
-    actions.extend(_price_actions(observation, menu_book, active_menu))
-
-    if _should_run_happy_hour(observation):
-        actions.append({"tool": "run_happy_hour", "args": {}})
-
-    special = _choose_daily_special(observation, menu_book, active_menu)
+    if should_run_happy_hour(observation, stress, inventory_days, marketing):
+        actions.append(tool_call("run_happy_hour"))
     if special:
-        actions.append({"tool": "offer_daily_special", "args": {"dish": special}})
+        actions.append(tool_call("offer_daily_special", dish=special))
 
-    actions.extend(_order_actions(observation, menu_book, active_menu, staff_level, marketing_spend))
-
-    if include_notes:
-        actions.append({
-            "tool": "save_notes",
-            "args": {"text": make_notes(observation, staff_level, marketing_spend, llm_used=llm_used)},
-        })
-
-    return actions
+    next_state = update_state_after_plan(observation, state, menu, shares, ingredient_daily, expected_covers)
+    actions.append(tool_call("save_notes", text=write_notes(next_state)))
+    return _dedupe_actions(actions)
 
 
-def _choose_staff_level(observation: dict[str, Any]) -> int:
-    day = int(observation.get("day") or 1)
-    dow = observation.get("day_of_week", "")
-    weather = observation.get("weather_today", "cloudy")
-    trend = observation.get("customer_trend", "Stable")
-    reputation = observation.get("reputation_band", "Very Good")
-    service = observation.get("service_summary") or {}
-
-    low_demand_sunday = day in {7, 21, 28} or (
-        day == 14 and not has_scenario_flag(observation, "supply")
-    )
-    if dow == "Sunday" and low_demand_sunday and not _is_renovation_capacity_limited(observation):
-        return 5
-
-    if _is_renovation_capacity_limited(observation):
-        if dow in {"Friday", "Saturday", "Sunday"}:
-            return 6
-        return 5
-    if has_scenario_flag(observation, "renovation"):
-        if dow == "Saturday":
-            return 8
-        if dow in {"Friday", "Sunday"}:
-            return 7
-        return 6
-
-    if dow == "Saturday":
-        level = 9
-    elif dow == "Friday":
-        level = 8
-    elif dow == "Sunday":
-        level = 7
-    else:
-        level = 6
-
-    if weather == "sunny" and dow in BUSY_DAYS:
-        level += 1
-    if trend == "Growing":
-        level += 1
-    if reputation in {"Poor", "Fair"}:
-        level += 1
-
-    walkouts = WALKOUT_PRESSURE.get(service.get("walkout_band", "None"), 0)
-    avg_wait = float(service.get("avg_wait_minutes") or 0)
-    peak_wait = float(service.get("peak_wait_minutes") or 0)
-    bottlenecks = len(service.get("kitchen_bottleneck_hours") or [])
-
-    if walkouts >= 2 or avg_wait > 8 or peak_wait > 20 or bottlenecks >= 2:
-        level += 1
-    if walkouts >= 3 or avg_wait > 12:
-        level += 1
-
-    covers = int(service.get("total_covers") or 0)
-    if covers and covers < 65 and walkouts == 0 and trend != "Growing":
-        level -= 1
-
-    cash = float(observation.get("cash", 0))
-    if cash < 4_000 and walkouts <= 1:
-        level -= 1
-    if cash < 2_500:
-        level -= 1
-
-    return max(5, min(11, level))
-
-
-def _choose_marketing_spend(observation: dict[str, Any], staff_level: int) -> int:
-    cash = float(observation.get("cash", 0))
-    if cash < 3_000:
-        return 0
-    if has_scenario_flag(observation, "renovation"):
-        return 0
-
-    dow = observation.get("day_of_week", "")
-    trend = observation.get("customer_trend", "Stable")
-    reputation = observation.get("reputation_band", "Very Good")
-    service = observation.get("service_summary") or {}
-    walkouts = WALKOUT_PRESSURE.get(service.get("walkout_band", "None"), 0)
-
-    if walkouts >= 2 or staff_level <= 5:
-        return 0
-    if reputation in {"Poor", "Fair"}:
-        return 60
-    if trend == "Declining":
-        return 100
-    if dow in BUSY_DAYS and cash > 6_000:
-        return 120
-    if dow == "Sunday" and cash > 6_000:
-        return 80
-    return 0
-
-
-def _price_actions(
+def price_actions(
     observation: dict[str, Any],
-    menu_book: dict[str, dict[str, Any]],
-    active_menu: list[str],
+    menu: list[str],
+    supplier_options: dict[str, list[dict[str, Any]]],
+    stress: float,
 ) -> list[dict[str, Any]]:
-    reputation = observation.get("reputation_band", "Very Good")
-    service = observation.get("service_summary") or {}
-    walkouts = WALKOUT_PRESSURE.get(service.get("walkout_band", "None"), 0)
-    stockouts = bool(service.get("dishes_unavailable_at") or {})
-    covers_yesterday = float(service.get("total_covers") or 0)
-    explicit_stress_scenario = (
-        has_scenario_flag(observation, "supply")
-        or has_scenario_flag(observation, "renovation")
-    )
-    real_demand_pressure = explicit_stress_scenario or covers_yesterday >= 120
-
-    if _is_renovation_capacity_limited(observation):
-        multiplier = 1.20
-    else:
-        multiplier = REPUTATION_PRICE_MULTIPLIER.get(reputation, 1.0)
-    if stockouts and not _is_renovation_capacity_limited(observation):
-        multiplier = min(multiplier, 1.00)
-    elif real_demand_pressure and walkouts >= 3 and not _is_renovation_capacity_limited(observation):
-        multiplier = max(multiplier, 1.10)
-    elif real_demand_pressure and walkouts >= 2 and not _is_renovation_capacity_limited(observation):
-        multiplier = max(multiplier, 1.06)
-
+    dishes = {str(dish.get("name")): dish for dish in observation.get("menu_book", [])}
     actions: list[dict[str, Any]] = []
-    for dish_name in active_menu:
-        dish = menu_book.get(dish_name)
+    for name in menu:
+        dish = dishes.get(name)
         if not dish:
             continue
-        base_price = float(dish.get("base_price", 0))
-        current_price = float(dish.get("current_price", base_price))
-        target_price = round(base_price * multiplier, 2)
-        target_price = max(round(base_price * 0.8, 2), min(round(base_price * 1.2, 2), target_price))
-
-        if abs(target_price - current_price) >= 0.05:
-            actions.append({"tool": "set_price", "args": {"dish": dish_name, "price": target_price}})
-
+        unit_cost = dish_unit_cost(dish, supplier_options)
+        target_price = price_for_dish(dish, unit_cost, observation, stress)
+        current_price = safe_float(dish.get("current_price"), safe_float(dish.get("base_price")))
+        if abs(target_price - current_price) >= 0.03:
+            actions.append(tool_call("set_price", dish=name, price=target_price))
     return actions
 
 
-def _should_run_happy_hour(observation: dict[str, Any]) -> bool:
-    cash = float(observation.get("cash", 0))
-    if cash < 3_500:
-        return False
-    if has_scenario_flag(observation, "renovation"):
-        return False
-
-    dow = observation.get("day_of_week", "")
-    trend = observation.get("customer_trend", "Stable")
-    service = observation.get("service_summary") or {}
-
-    if service.get("dishes_unavailable_at"):
-        return False
-    if WALKOUT_PRESSURE.get(service.get("walkout_band", "None"), 0) >= 2:
-        return False
-    if dow in SLOW_DAYS:
-        return True
-    return trend == "Declining" and dow not in BUSY_DAYS
-
-
-def _choose_daily_special(
+def forecast_ingredients(
     observation: dict[str, Any],
-    menu_book: dict[str, dict[str, Any]],
-    active_menu: list[str],
-) -> str | None:
-    cheapest = cheapest_supplier_by_ingredient(observation)
-    stock = stock_by_ingredient(observation, min_expires_in_days=1)
-    pending = pending_by_ingredient(observation)
+    menu: list[str],
+    shares: dict[str, float],
+    state: dict[str, Any],
+    *,
+    horizon_days: int = 9,
+) -> dict[str, list[float]]:
+    dishes = {str(dish.get("name")): dish for dish in observation.get("menu_book", [])}
+    previous_daily = state.get("daily_ingredient_kg") if isinstance(state.get("daily_ingredient_kg"), dict) else {}
+    forecast: dict[str, list[float]] = {}
 
-    best_name = None
-    best_score = float("-inf")
-    for dish_name in active_menu:
-        dish = menu_book.get(dish_name)
-        if not dish:
-            continue
+    for offset in range(horizon_days):
+        covers = estimate_covers(observation, state, offset=offset)
+        for dish_name in menu:
+            dish = dishes.get(dish_name)
+            if not dish:
+                continue
+            dish_covers = covers * shares.get(dish_name, 1.0 / max(1, len(menu)))
+            for ingredient, qty in recipe_ingredients(dish).items():
+                value = dish_covers * qty
+                if offset == 0 and ingredient in previous_daily:
+                    value = 0.72 * value + 0.28 * safe_float(previous_daily.get(ingredient))
+                forecast.setdefault(ingredient, [0.0] * horizon_days)
+                forecast[ingredient][offset] += value
 
-        available = servings_available(dish, stock, pending)
-        if available < 12:
-            continue
-
-        margin = estimated_margin(dish, cheapest)
-        score = margin + min(available, 50) * 0.05
-        if score > best_score:
-            best_name = dish_name
-            best_score = score
-
-    return best_name or (active_menu[0] if active_menu else None)
+    return forecast
 
 
-def _choose_safe_menu(
+def order_actions(
     observation: dict[str, Any],
-    menu_book: dict[str, dict[str, Any]],
-    active_menu: list[str],
-) -> list[str]:
-    if len(active_menu) < 5:
-        return active_menu
-
-    service = observation.get("service_summary") or {}
-    stockout_dishes = set((service.get("dishes_unavailable_at") or {}).keys())
-    if not stockout_dishes:
-        return active_menu
-
-    stock = stock_by_ingredient(observation, min_expires_in_days=1)
-    pending = pending_by_ingredient(observation)
-
-    safe: list[str] = []
-    for dish_name in active_menu:
-        dish = menu_book.get(dish_name)
-        if not dish:
-            continue
-        available = servings_available(dish, stock, pending)
-        if dish_name not in stockout_dishes or available >= 10:
-            safe.append(dish_name)
-
-    if len(safe) >= 5:
-        return safe
-    return active_menu
-
-
-def _choose_planned_menu(
-    observation: dict[str, Any],
-    menu_book: dict[str, dict[str, Any]],
-) -> list[str]:
-    if has_scenario_flag(observation, "supply"):
-        preferred = [
-            "Pizza Margherita",
-            "Chicken Parmesan",
-            "Chicken Caesar Salad",
-            "Mushroom Risotto",
-            "Spaghetti Carbonara",
-        ]
-        return [dish for dish in preferred if dish in menu_book]
-
-    if has_scenario_flag(observation, "renovation"):
-        preferred = [
-            "Pizza Margherita",
-            "Chicken Parmesan",
-            "Chicken Caesar Salad",
-            "Mushroom Risotto",
-            "Spaghetti Carbonara",
-        ]
-        return [dish for dish in preferred if dish in menu_book]
-
-    return list(observation.get("active_menu") or active_from_book(menu_book))
-
-
-def _is_renovation_capacity_limited(observation: dict[str, Any]) -> bool:
-    day = int(observation.get("day") or 1)
-    return day <= 14 and has_scenario_flag(observation, "renovation")
-
-
-def _order_actions(
-    observation: dict[str, Any],
-    menu_book: dict[str, dict[str, Any]],
-    active_menu: list[str],
+    menu: list[str],
+    supplier_options: dict[str, list[dict[str, Any]]],
+    stock: dict[str, float],
+    pending: dict[str, float],
+    shelf_life: dict[str, int],
+    forecast: dict[str, list[float]],
     staff_level: int,
-    marketing_spend: int,
+    marketing: float,
 ) -> list[dict[str, Any]]:
-    daily_need = _project_daily_ingredient_need(observation, menu_book, active_menu)
-    if not daily_need:
-        return []
-
-    inventory_fresh = stock_by_ingredient(observation, min_expires_in_days=1)
-    suppliers = observation.get("supplier_catalog", [])
-    shelf_defaults = SUPPLY_SHELF_LIFE_DAYS if has_scenario_flag(observation, "supply") else DEFAULT_SHELF_LIFE_DAYS
-    shelf_life = {
-        item["ingredient"]: max(
-            float(item.get("shelf_life_days") or 0),
-            shelf_defaults.get(item["ingredient"], 4.0),
-        )
-        for item in observation.get("inventory", [])
-    }
-    stockout_names = stockout_ingredients(observation, menu_book)
-
-    cash = float(observation.get("cash", 0))
-    staff_cost = float(observation.get("staff_cost_per_person") or 120)
-    daily_overhead = 300 + staff_level * staff_cost + marketing_spend
-    reserve = max(2_000, daily_overhead * 2.5)
-    if cash < 5_000:
-        reserve = max(reserve, daily_overhead * 3.5)
-
-    budget = max(0.0, cash - reserve)
+    del menu
+    cash = safe_float(observation.get("cash"))
+    reserve = _cash_reserve(cash, staff_level, marketing)
+    budget = max(0.0, min(cash - reserve, cash * MAX_ORDER_BUDGET_FRACTION))
     if budget <= 0:
         return []
 
-    order_candidates = []
-    fallback_candidates = []
-    for ingredient, need_per_day in daily_need.items():
-        if need_per_day <= 0:
+    stockout_ingredients = ingredients_from_stockout_dishes(observation)
+    candidates: list[dict[str, Any]] = []
+    current_day = safe_int(observation.get("day"), 1)
+    weekend_window = _weekend_protection_window(str(observation.get("day_of_week", "")))
+
+    for ingredient, daily_values in forecast.items():
+        supplier = best_supplier(supplier_options, ingredient)
+        if supplier is None:
             continue
 
-        current = inventory_fresh.get(ingredient, 0.0)
-        coverage_days = current / need_per_day if need_per_day else 99
-
-        life_days = float(shelf_life.get(ingredient, shelf_defaults.get(ingredient, 4.0)))
-        max_cap = 7.0 if has_scenario_flag(observation, "supply") and life_days >= 7.0 else 5.0
-        freshness_cap = max(2.0, min(life_days, max_cap))
-        preferred_supplier = best_supplier_for_ingredient(observation, suppliers, ingredient)
-        if not preferred_supplier:
+        eta = max(1, safe_int(supplier.get("eta_days"), 1))
+        life = max(1, shelf_life.get(ingredient, 7))
+        unit_price = safe_float(supplier.get("price"))
+        min_order = safe_float(supplier.get("min_order_kg"), 1.0)
+        demand_today = daily_values[0] if daily_values else 0.0
+        if demand_today <= 0:
             continue
 
-        preferred = _build_order_candidate(
-            observation,
-            ingredient,
-            preferred_supplier,
-            need_per_day,
-            current,
-            coverage_days,
-            freshness_cap,
-            stockout_names,
-        )
-        if preferred is None:
-            continue
+        upper_target_days = max(5, min(10, life))
+        lower_target_days = min(5, upper_target_days)
+        target_days = int(clamp(eta + 5, lower_target_days, upper_target_days))
+        protection_window = max(eta, weekend_window)
+        demand_until_eta = sum(daily_values[: min(len(daily_values), eta + 1)])
+        demand_until_protection = sum(daily_values[: min(len(daily_values), protection_window + 1)])
+        demand_until_target = sum(daily_values[: min(len(daily_values), target_days)])
+        pending_due_target = pending_due_by_ingredient(observation, through_day=current_day + target_days).get(ingredient, 0.0)
+        inventory_position = stock.get(ingredient, 0.0) + pending_due_target
+        all_pending = pending.get(ingredient, 0.0)
 
-        fallback_candidates.append(preferred)
-        order_candidates.append(preferred)
-
-        if preferred["urgent"] or preferred["coverage_days"] < 2.5:
-            for supplier in suppliers:
-                if supplier["name"] == preferred_supplier["name"]:
-                    continue
-                if ingredient not in supplier.get("ingredients", {}):
-                    continue
-                alternate = _build_order_candidate(
-                    observation,
-                    ingredient,
-                    supplier,
-                    need_per_day,
-                    current,
-                    coverage_days,
-                    freshness_cap,
-                    stockout_names,
-                )
-                if alternate is None:
-                    continue
-                if alternate["eta_days"] <= preferred["eta_days"] or alternate["cost"] <= preferred["cost"] * 0.9:
-                    order_candidates.append(alternate)
-
-    order_candidates.sort(key=lambda item: (not item["urgent"], item["coverage_days"], item["cost"]))
-    optimized = None
-    if not has_scenario_flag(observation, "supply"):
-        optimized = optimize_order_candidates(order_candidates, budget)
-    if optimized is not None:
-        order_candidates = optimized
-    else:
-        order_candidates = sorted(
-            fallback_candidates,
-            key=lambda item: (not item["urgent"], item["coverage_days"], item["cost"]),
+        eoq = eoq_piecewise(
+            daily_values[: min(len(daily_values), target_days)],
+            [1.0] * min(len(daily_values), target_days),
+            unit_price,
+            life,
         )
 
+        stockout_multiplier = 1.35 if ingredient in stockout_ingredients else 1.0
+        target_stock = max(demand_until_target * stockout_multiplier, eoq)
+        max_reasonable = sum(daily_values[: min(len(daily_values), max(3, int(life * 0.95)))])
+        target_stock = min(target_stock, max_reasonable * 1.08)
+
+        need = target_stock - inventory_position
+        critical_position = stock.get(ingredient, 0.0) + pending_due_by_ingredient(observation, through_day=current_day + protection_window).get(ingredient, 0.0)
+        critical_threshold = demand_until_protection * (1.08 if weekend_window else 0.96)
+        critical = critical_position < critical_threshold
+        if need < min_order and not critical:
+            continue
+
+        quantity = max(min_order, need)
+        if critical:
+            quantity = max(quantity, min_order, demand_until_protection * 1.24 - critical_position)
+        quantity = min(quantity, max_reasonable - stock.get(ingredient, 0.0) - all_pending + demand_today)
+        quantity = round_kg(quantity)
+        if quantity < min_order:
+            quantity = round_kg(min_order)
+        if quantity <= 0:
+            continue
+
+        cost = quantity * unit_price
+        shortage_ratio = max(0.0, demand_until_protection - critical_position) / max(1.0, demand_until_protection)
+        priority = shortage_ratio * 7.0 + (1.8 if critical else 0.0) + (1.7 if ingredient in stockout_ingredients else 0.0)
+        priority += min(1.5, demand_today / 8.0)
+        priority -= max(0.0, quantity - max_reasonable) * 0.03
+
+        candidates.append({
+            "priority": priority,
+            "supplier": supplier,
+            "ingredient": ingredient,
+            "quantity": quantity,
+            "cost": cost,
+            "critical": critical,
+        })
+
+    candidates.sort(key=lambda item: (-item["priority"], item["ingredient"]))
     actions: list[dict[str, Any]] = []
     spent = 0.0
-    for item in order_candidates:
-        if spent + item["cost"] > budget:
+    ordered_ingredients: set[str] = set()
+    for item in candidates:
+        ingredient = item["ingredient"]
+        if ingredient in ordered_ingredients:
             continue
-        actions.append({
-            "tool": "place_order",
-            "args": {
-                "supplier": item["supplier"],
-                "ingredient": item["ingredient"],
-                "quantity_kg": item["qty"],
-            },
-        })
-        spent += item["cost"]
-
+        supplier = item["supplier"]
+        quantity = safe_float(item["quantity"])
+        cost = quantity * safe_float(supplier.get("price"))
+        remaining = budget - spent
+        min_order = safe_float(supplier.get("min_order_kg"), 1.0)
+        if cost > remaining:
+            affordable = round_kg(remaining / max(0.01, safe_float(supplier.get("price"))))
+            if item["critical"] and affordable >= min_order:
+                quantity = affordable
+                cost = quantity * safe_float(supplier.get("price"))
+            else:
+                continue
+        if quantity < min_order or cost <= 0:
+            continue
+        actions.append(tool_call(
+            "place_order",
+            supplier=supplier["supplier"],
+            ingredient=ingredient,
+            quantity_kg=quantity,
+        ))
+        spent += cost
+        ordered_ingredients.add(ingredient)
     return actions
 
 
-def _build_order_candidate(
+def estimate_inventory_days(
+    menu: list[str],
     observation: dict[str, Any],
-    ingredient: str,
-    supplier: dict[str, Any],
-    need_per_day: float,
-    current_kg: float,
-    coverage_days: float,
-    freshness_cap: float,
-    stockout_names: set[str],
-) -> dict[str, Any] | None:
-    eta_days = days_until_delivery(supplier, observation.get("day_of_week", "Monday"))
-    price = float(supplier["ingredients"][ingredient])
-    setup_cost = setup_cost_for_order(price, need_per_day, eta_days)
-    holding_cost = holding_cost_per_day(price, freshness_cap)
-    demand_rates = _ingredient_demand_profile(observation, need_per_day)
-    portions = [1.0 / len(demand_rates)] * len(demand_rates)
-    eoq_qty = eoq_nonconstant_demand(demand_rates, portions, setup_cost, holding_cost)
-    cycle_days = max(1.0, min(eoq_qty / need_per_day if need_per_day else 1.0, freshness_cap))
-
-    safety_days = 0.7
-    if coverage_days < eta_days + 0.5:
-        safety_days += 0.8
-    if ingredient in stockout_names:
-        safety_days += 1.0
-
-    target_days = max(eta_days + safety_days, eta_days + cycle_days)
-    target_days = min(target_days, eta_days + max(2.0, freshness_cap))
-    if ingredient in stockout_names:
-        target_days += 0.5
-
-    target_kg = need_per_day * target_days
-    pending_window = pending_by_ingredient_within(observation, target_days)
-    effective_kg = current_kg + pending_window.get(ingredient, 0.0)
-    if effective_kg >= target_kg:
-        return None
-
-    min_order = float(supplier.get("min_order_kg") or 1.0)
-    qty = round_order_qty(max(min_order, target_kg - effective_kg))
-    urgent = ingredient in stockout_names or coverage_days < max(1.5, eta_days + 0.5)
-    return {
-        "ingredient": ingredient,
-        "supplier": supplier["name"],
-        "qty": qty,
-        "cost": qty * price,
-        "coverage_days": coverage_days,
-        "target_days": target_days,
-        "eta_days": eta_days,
-        "need_per_day": need_per_day,
-        "urgent": urgent,
-        "stockout": ingredient in stockout_names,
-        "eoq_qty": eoq_qty,
-    }
-
-
-def _ingredient_demand_profile(observation: dict[str, Any], need_per_day: float) -> list[float]:
-    dow = observation.get("day_of_week", "Monday")
-    current_idx = WEEKDAYS.index(dow) if dow in WEEKDAYS else 0
-    today_base = BASE_COVERS_BY_DAY.get(dow, 100)
-    today_weather = WEATHER_DEMAND.get(observation.get("weather_today", "cloudy"), 1.0)
-    forecast = list(observation.get("weather_forecast") or [])
-
-    rates = []
-    for offset in range(4):
-        next_dow = WEEKDAYS[(current_idx + offset) % len(WEEKDAYS)]
-        day_factor = BASE_COVERS_BY_DAY.get(next_dow, today_base) / max(today_base, 1)
-        if offset == 0:
-            weather = observation.get("weather_today", "cloudy")
-        else:
-            weather = forecast[offset - 1] if offset - 1 < len(forecast) else observation.get("weather_today", "cloudy")
-        weather_factor = WEATHER_DEMAND.get(weather, today_weather) / max(today_weather, 0.01)
-        rates.append(max(0.0, need_per_day * day_factor * weather_factor))
-    return rates or [need_per_day]
-
-
-def _project_daily_ingredient_need(
-    observation: dict[str, Any],
-    menu_book: dict[str, dict[str, Any]],
-    active_menu: list[str],
-) -> dict[str, float]:
-    portions = _project_daily_portions(observation, active_menu)
-    need: dict[str, float] = defaultdict(float)
-
-    for dish_name, projected_portions in portions.items():
-        dish = menu_book.get(dish_name)
-        if not dish:
+    stock: dict[str, float],
+    pending: dict[str, float],
+    ingredient_daily: dict[str, float],
+) -> float:
+    del menu, observation
+    days: list[float] = []
+    for ingredient, daily in ingredient_daily.items():
+        if daily <= 0.01:
             continue
-        for ingredient in dish.get("ingredients", []):
-            need[ingredient["ingredient"]] += projected_portions * float(ingredient["quantity_kg"])
+        days.append((stock.get(ingredient, 0.0) + pending.get(ingredient, 0.0)) / daily)
+    if not days:
+        return 0.0
+    days.sort()
+    return days[max(0, len(days) // 4)]
 
-    if has_scenario_flag(observation, "renovation"):
-        return {ingredient: qty * 1.35 for ingredient, qty in need.items()}
-    return dict(need)
 
-
-def _project_daily_portions(observation: dict[str, Any], active_menu: list[str]) -> dict[str, float]:
-    if not active_menu:
-        return {}
-
+def ingredients_from_stockout_dishes(observation: dict[str, Any]) -> set[str]:
     service = observation.get("service_summary") or {}
-    sold = {
-        dish: float(qty)
-        for dish, qty in (service.get("dishes_sold") or {}).items()
-        if dish in active_menu
-    }
-    stockouts = set((service.get("dishes_unavailable_at") or {}).keys())
-    for dish in stockouts:
-        if dish in active_menu:
-            sold[dish] = sold.get(dish, 0.0) + 6.0
-
-    sold_total = sum(sold.values())
-    expected_covers = expected_covers_for_day(observation)
-
-    if sold_total >= 10:
-        smoothed_total = sold_total + len(active_menu)
-        return {
-            dish: max(4.0, expected_covers * ((sold.get(dish, 0.0) + 1.0) / smoothed_total))
-            for dish in active_menu
-        }
-
-    even_share = expected_covers / len(active_menu)
-    return {dish: max(6.0, even_share) for dish in active_menu}
+    stockout_dishes = set((service.get("dishes_unavailable_at") or {}).keys())
+    if not stockout_dishes:
+        return set()
+    dishes = {str(dish.get("name")): dish for dish in observation.get("menu_book", [])}
+    ingredients: set[str] = set()
+    for dish_name in stockout_dishes:
+        dish = dishes.get(str(dish_name))
+        if dish:
+            ingredients.update(recipe_ingredients(dish).keys())
+    return ingredients
 
 
-def expected_covers_for_day(observation: dict[str, Any]) -> float:
-    dow = observation.get("day_of_week", "Monday")
-    base = BASE_COVERS_BY_DAY.get(dow, 100)
-    weather = WEATHER_DEMAND.get(observation.get("weather_today", "cloudy"), 1.0)
-    trend = TREND_DEMAND.get(observation.get("customer_trend", "Stable"), 1.0)
-    reputation = observation.get("reputation_band", "Very Good")
+def _cash_reserve(cash: float, staff_level: int, marketing: float) -> float:
+    operating_floor = FIXED_DAILY_COST * 3.0 + STAFF_COST * staff_level * 2.0 + marketing
+    if cash < 3500:
+        return max(EMERGENCY_CASH_RESERVE, operating_floor)
+    return max(MIN_CASH_RESERVE, operating_floor)
 
-    reputation_factor = {
-        "Poor": 0.70,
-        "Fair": 0.84,
-        "Good": 0.95,
-        "Very Good": 1.00,
-        "Excellent": 1.08,
-    }.get(reputation, 1.0)
 
-    service = observation.get("service_summary") or {}
-    yesterday = float(service.get("total_covers") or 0)
-    estimate = base * weather * trend * reputation_factor
+def _weekend_protection_window(day_of_week: str) -> int:
+    if day_of_week == "Thursday":
+        return 3
+    if day_of_week == "Friday":
+        return 2
+    if day_of_week == "Saturday":
+        return 1
+    return 0
 
-    if yesterday >= 20:
-        estimate = max(estimate, yesterday * 0.85)
-        estimate = min(estimate, yesterday * 1.35)
 
-    if has_scenario_flag(observation, "renovation"):
-        estimate = max(estimate, 115.0)
+def _menu_changed(planned: list[Any], active: list[Any]) -> bool:
+    planned_names = [str(item) for item in planned]
+    active_names = [str(item) for item in active]
+    return set(planned_names) != set(active_names)
 
-    return max(55.0, min(170.0, estimate))
+
+def _dedupe_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    ordered_ingredients: set[str] = set()
+    last_by_singleton: dict[str, int] = {}
+    singleton_tools = {"set_menu", "set_staff_level", "set_marketing_spend", "save_notes"}
+
+    for action in actions:
+        tool = action.get("tool")
+        args = action.get("args") or {}
+        if tool == "place_order":
+            ingredient = args.get("ingredient")
+            if ingredient in ordered_ingredients:
+                continue
+            ordered_ingredients.add(str(ingredient))
+            result.append(action)
+            continue
+        if tool in singleton_tools:
+            if tool in last_by_singleton:
+                result[last_by_singleton[tool]] = action
+            else:
+                last_by_singleton[tool] = len(result)
+                result.append(action)
+            continue
+        if tool == "set_price":
+            key = (tool, args.get("dish"))
+            for index in range(len(result) - 1, -1, -1):
+                existing = result[index]
+                if existing.get("tool") == key[0] and (existing.get("args") or {}).get("dish") == key[1]:
+                    result[index] = action
+                    break
+            else:
+                result.append(action)
+            continue
+        result.append(action)
+    return result
