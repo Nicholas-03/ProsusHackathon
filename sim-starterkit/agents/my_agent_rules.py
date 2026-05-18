@@ -95,7 +95,10 @@ def _choose_staff_level(observation: dict[str, Any]) -> int:
     reputation = observation.get("reputation_band", "Very Good")
     service = observation.get("service_summary") or {}
 
-    if dow == "Sunday" and day in {7, 21} and not _is_renovation_capacity_limited(observation):
+    low_demand_sunday = day in {7, 21, 28} or (
+        day == 14 and not has_scenario_flag(observation, "supply")
+    )
+    if dow == "Sunday" and low_demand_sunday and not _is_renovation_capacity_limited(observation):
         return 5
 
     if _is_renovation_capacity_limited(observation):
@@ -300,6 +303,16 @@ def _choose_planned_menu(
     observation: dict[str, Any],
     menu_book: dict[str, dict[str, Any]],
 ) -> list[str]:
+    if has_scenario_flag(observation, "supply"):
+        preferred = [
+            "Pizza Margherita",
+            "Chicken Parmesan",
+            "Chicken Caesar Salad",
+            "Mushroom Risotto",
+            "Spaghetti Carbonara",
+        ]
+        return [dish for dish in preferred if dish in menu_book]
+
     if has_scenario_flag(observation, "renovation"):
         preferred = [
             "Pizza Margherita",
