@@ -25,6 +25,17 @@ import httpx
 Strategy = Callable[[dict, int], list[dict]]
 
 
+def _normalize_env_key(key: str) -> str:
+    key = key.strip()
+    if not key:
+        return ""
+    if key.upper().replace("_", " ") in {"API KEY", "OPENAI API KEY"}:
+        return "OPENAI_API_KEY"
+    if any(char.isspace() for char in key):
+        return ""
+    return key
+
+
 def _load_dotenv() -> None:
     """Load simple KEY=VALUE pairs from the nearest .env file, if present."""
     candidates: list[Path] = []
@@ -41,8 +52,8 @@ def _load_dotenv() -> None:
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, value = line.split("=", 1)
-            key = key.strip()
-            if not key or any(char.isspace() for char in key):
+            key = _normalize_env_key(key)
+            if not key:
                 continue
             os.environ.setdefault(key, value.strip().strip('"').strip("'"))
         return
