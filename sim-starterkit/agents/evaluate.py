@@ -30,10 +30,16 @@ import argparse
 import importlib
 import os
 import sys
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import httpx
+
+try:
+    from dotenv import find_dotenv, load_dotenv
+
+    load_dotenv(find_dotenv(usecwd=True), override=False)
+except Exception:
+    pass
 
 from agents.runner import run_game
 

@@ -1,7 +1,38 @@
 [project]
 name = "prosushackathon"
 version = "0.1.0"
-description = "Add your description here"
+description = "Hybrid autonomous restaurant operator for the Prosus/AISO REST-bench hackathon"
 readme = "README.md"
-requires-python = ">=3.13"
-dependencies = []
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "duckdb>=1.1",
+    "httpx>=0.28",
+    "litellm>=1.70",
+    "numpy>=1.26",
+    "openai>=2.20",
+    "orjson>=3.10",
+    "ortools>=9.9",
+    "pandas>=2.2",
+    "pydantic>=2.8",
+    "pytest>=8.3",
+    "python-dotenv>=1.0",
+    "rich>=13.9",
+    "ruff>=0.8",
+    "tenacity>=8.2",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "sim-starterkit"}
+
+[tool.setuptools.packages.find]
+where = ["sim-starterkit"]
+include = ["agents*"]
+
+[tool.pytest.ini_options]
+testpaths = ["sim-starterkit/tests"]
+pythonpath = ["sim-starterkit"]
+addopts = "-p no:cacheprovider"

@@ -13,13 +13,17 @@ Each dict in the list is a tool call: {"tool": "place_order", "args": {...}}
 
 from __future__ import annotations
 
-import json
 import os
-import sys
-import time
 from typing import Callable
 
 import httpx
+
+try:
+    from dotenv import find_dotenv, load_dotenv
+
+    load_dotenv(find_dotenv(usecwd=True), override=False)
+except Exception:
+    pass
 
 Strategy = Callable[[dict, int], list[dict]]
 
