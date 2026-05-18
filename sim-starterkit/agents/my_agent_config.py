@@ -1,21 +1,10 @@
-"""Configuration for the hybrid restaurant agent."""
+"""Configuration for the deterministic restaurant agent."""
 
 from __future__ import annotations
 
 import os
 
 TEAM_NAME = os.getenv("RESTBENCH_TEAM_NAME", "la-forchetta-intelligente")
-
-LLM_MODEL = os.getenv("AGENT_MODEL", "gpt-4.1")
-LLM_BASE_URL = os.getenv(
-    "OPENAI_BASE_URL",
-    "http://litellm-production.eba-pvykax23.eu-west-1.elasticbeanstalk.com",
-)
-LLM_TIMEOUT_SECONDS = float(os.getenv("MY_AGENT_LLM_TIMEOUT_SECONDS", "12"))
-LLM_MAX_TOKENS = int(os.getenv("MY_AGENT_LLM_MAX_TOKENS", "900"))
-
-USE_LLM = os.getenv("MY_AGENT_USE_LLM", "1").strip().lower() not in {"0", "false", "no", "off"}
-USE_ORTOOLS = os.getenv("MY_AGENT_USE_ORTOOLS", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 

@@ -1,8 +1,4 @@
-"""Deterministic rule layer for the RestBench agent.
-
-The rules are the reliable fallback: they make complete daily decisions without
-needing a model call. The LLM layer can add bounded adjustments on top.
-"""
+"""Deterministic rule layer for the RestBench agent."""
 
 from __future__ import annotations
 
@@ -46,7 +42,6 @@ def build_rule_actions(
     day: int,
     *,
     include_notes: bool = True,
-    llm_used: bool = False,
 ) -> list[dict[str, Any]]:
     """Return the deterministic baseline actions for today."""
     actions: list[dict[str, Any]] = []
@@ -79,7 +74,7 @@ def build_rule_actions(
     if include_notes:
         actions.append({
             "tool": "save_notes",
-            "args": {"text": make_notes(observation, staff_level, marketing_spend, llm_used=llm_used)},
+            "args": {"text": make_notes(observation, staff_level, marketing_spend)},
         })
 
     return actions
@@ -177,13 +172,23 @@ def _price_actions(
     service = observation.get("service_summary") or {}
     walkouts = WALKOUT_PRESSURE.get(service.get("walkout_band", "None"), 0)
     stockouts = bool(service.get("dishes_unavailable_at") or {})
+    covers_yesterday = float(service.get("total_covers") or 0)
+    explicit_stress_scenario = (
+        has_scenario_flag(observation, "supply")
+        or has_scenario_flag(observation, "renovation")
+    )
+    real_demand_pressure = explicit_stress_scenario or covers_yesterday >= 120
 
     if _is_renovation_capacity_limited(observation):
         multiplier = 1.20
     else:
         multiplier = REPUTATION_PRICE_MULTIPLIER.get(reputation, 1.0)
-    if walkouts >= 2 or stockouts:
-        multiplier = min(multiplier, 1.00) if not _is_renovation_capacity_limited(observation) else multiplier
+    if stockouts and not _is_renovation_capacity_limited(observation):
+        multiplier = min(multiplier, 1.00)
+    elif real_demand_pressure and walkouts >= 3 and not _is_renovation_capacity_limited(observation):
+        multiplier = max(multiplier, 1.10)
+    elif real_demand_pressure and walkouts >= 2 and not _is_renovation_capacity_limited(observation):
+        multiplier = max(multiplier, 1.06)
 
     actions: list[dict[str, Any]] = []
     for dish_name in active_menu:

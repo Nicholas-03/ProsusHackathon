@@ -28,8 +28,6 @@ def _normalize_env_key(key: str) -> str:
     key = key.strip()
     if not key:
         return ""
-    if key.upper().replace("_", " ") in {"API KEY", "OPENAI API KEY"}:
-        return "OPENAI_API_KEY"
     if any(char.isspace() for char in key):
         return ""
     return key
