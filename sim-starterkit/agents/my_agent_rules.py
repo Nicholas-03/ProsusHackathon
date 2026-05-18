@@ -18,6 +18,7 @@ from agents.my_agent_config import (
     WALKOUT_PRESSURE,
     WEATHER_DEMAND,
 )
+from agents.my_agent_optimizer import optimize_order_candidates
 from agents.my_agent_utils import (
     active_from_book,
     best_supplier_for_ingredient,
@@ -333,45 +334,64 @@ def _order_actions(
         return []
 
     order_candidates = []
+    fallback_candidates = []
     for ingredient, need_per_day in daily_need.items():
         if need_per_day <= 0:
             continue
 
-        supplier = best_supplier_for_ingredient(observation, suppliers, ingredient)
-        if not supplier:
-            continue
-
-        eta_days = days_until_delivery(supplier, observation.get("day_of_week", "Monday"))
         current = inventory_fresh.get(ingredient, 0.0)
         incoming = pending.get(ingredient, 0.0)
         effective = current + incoming
         coverage_days = effective / need_per_day if need_per_day else 99
 
         freshness_cap = max(2.0, min(float(shelf_life.get(ingredient, 4)), 5.0))
-        target_days = min(max(eta_days + 2.0, 3.0), freshness_cap)
-        if ingredient in stockout_names:
-            target_days += 1.0
-
-        target_kg = need_per_day * target_days
-        if effective >= target_kg:
+        preferred_supplier = best_supplier_for_ingredient(observation, suppliers, ingredient)
+        if not preferred_supplier:
             continue
 
-        min_order = float(supplier.get("min_order_kg") or 1.0)
-        qty = round_order_qty(max(min_order, target_kg - effective))
+        preferred = _build_order_candidate(
+            observation,
+            ingredient,
+            preferred_supplier,
+            need_per_day,
+            effective,
+            coverage_days,
+            freshness_cap,
+            stockout_names,
+        )
+        if preferred is None:
+            continue
 
-        price = float(supplier["ingredients"][ingredient])
-        cost = qty * price
-        urgent = ingredient in stockout_names or coverage_days < max(1.5, eta_days)
-        order_candidates.append({
-            "ingredient": ingredient,
-            "supplier": supplier["name"],
-            "qty": qty,
-            "cost": cost,
-            "coverage_days": coverage_days,
-            "urgent": urgent,
-        })
+        fallback_candidates.append(preferred)
+        order_candidates.append(preferred)
+
+        if preferred["urgent"] or preferred["coverage_days"] < 2.5:
+            for supplier in suppliers:
+                if supplier["name"] == preferred_supplier["name"]:
+                    continue
+                if ingredient not in supplier.get("ingredients", {}):
+                    continue
+                alternate = _build_order_candidate(
+                    observation,
+                    ingredient,
+                    supplier,
+                    need_per_day,
+                    effective,
+                    coverage_days,
+                    freshness_cap,
+                    stockout_names,
+                )
+                if alternate is None:
+                    continue
+                if alternate["eta_days"] <= preferred["eta_days"] or alternate["cost"] <= preferred["cost"] * 0.9:
+                    order_candidates.append(alternate)
 
     order_candidates.sort(key=lambda item: (not item["urgent"], item["coverage_days"], item["cost"]))
+    optimized = optimize_order_candidates(order_candidates, budget)
+    if optimized is not None:
+        order_candidates = optimized
+    else:
+        order_candidates = fallback_candidates
 
     actions: list[dict[str, Any]] = []
     spent = 0.0
@@ -389,6 +409,43 @@ def _order_actions(
         spent += item["cost"]
 
     return actions
+
+
+def _build_order_candidate(
+    observation: dict[str, Any],
+    ingredient: str,
+    supplier: dict[str, Any],
+    need_per_day: float,
+    effective_kg: float,
+    coverage_days: float,
+    freshness_cap: float,
+    stockout_names: set[str],
+) -> dict[str, Any] | None:
+    eta_days = days_until_delivery(supplier, observation.get("day_of_week", "Monday"))
+    target_days = min(max(eta_days + 2.0, 3.0), freshness_cap)
+    if ingredient in stockout_names:
+        target_days += 1.0
+
+    target_kg = need_per_day * target_days
+    if effective_kg >= target_kg:
+        return None
+
+    min_order = float(supplier.get("min_order_kg") or 1.0)
+    qty = round_order_qty(max(min_order, target_kg - effective_kg))
+    price = float(supplier["ingredients"][ingredient])
+    urgent = ingredient in stockout_names or coverage_days < max(1.5, eta_days)
+    return {
+        "ingredient": ingredient,
+        "supplier": supplier["name"],
+        "qty": qty,
+        "cost": qty * price,
+        "coverage_days": coverage_days,
+        "target_days": target_days,
+        "eta_days": eta_days,
+        "need_per_day": need_per_day,
+        "urgent": urgent,
+        "stockout": ingredient in stockout_names,
+    }
 
 
 def _project_daily_ingredient_need(

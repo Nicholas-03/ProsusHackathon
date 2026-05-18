@@ -15,6 +15,7 @@ LLM_TIMEOUT_SECONDS = float(os.getenv("MY_AGENT_LLM_TIMEOUT_SECONDS", "12"))
 LLM_MAX_TOKENS = int(os.getenv("MY_AGENT_LLM_MAX_TOKENS", "900"))
 
 USE_LLM = os.getenv("MY_AGENT_USE_LLM", "1").strip().lower() not in {"0", "false", "no", "off"}
+USE_ORTOOLS = os.getenv("MY_AGENT_USE_ORTOOLS", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
