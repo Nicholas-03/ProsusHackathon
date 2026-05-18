@@ -1,7 +1,7 @@
 """Hybrid RestBench agent.
 
 The rule layer creates a full deterministic plan. The LLM layer, when enabled
-and configured, can add conservative adjustments through the LiteLLM proxy.
+and configured, can add conservative adjustments through the OpenAI API.
 """
 
 from __future__ import annotations

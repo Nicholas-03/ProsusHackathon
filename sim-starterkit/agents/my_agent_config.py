@@ -6,16 +6,18 @@ import os
 
 TEAM_NAME = os.getenv("RESTBENCH_TEAM_NAME", "la-forchetta-intelligente")
 
-LLM_MODEL = os.getenv("AGENT_MODEL", "gpt-4.1")
-LLM_BASE_URL = os.getenv(
-    "OPENAI_BASE_URL",
-    "http://litellm-production.eba-pvykax23.eu-west-1.elasticbeanstalk.com",
+LLM_MODEL = os.getenv("AGENT_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-5.5"
+LLM_BASE_URL = (
+    os.getenv("MY_AGENT_OPENAI_BASE_URL")
+    or os.getenv("AGENT_OPENAI_BASE_URL")
+    or "https://api.openai.com/v1"
 )
-LLM_TIMEOUT_SECONDS = float(os.getenv("MY_AGENT_LLM_TIMEOUT_SECONDS", "12"))
-LLM_MAX_TOKENS = int(os.getenv("MY_AGENT_LLM_MAX_TOKENS", "900"))
+LLM_TIMEOUT_SECONDS = float(os.getenv("MY_AGENT_LLM_TIMEOUT_SECONDS", "18"))
+LLM_MAX_TOKENS = int(os.getenv("MY_AGENT_LLM_MAX_TOKENS", "1200"))
+LLM_REASONING_EFFORT = os.getenv("MY_AGENT_LLM_REASONING_EFFORT", "medium")
+LLM_AUDIT_EVERY_DAYS = int(os.getenv("MY_AGENT_LLM_AUDIT_EVERY_DAYS", "3"))
 
 USE_LLM = os.getenv("MY_AGENT_USE_LLM", "1").strip().lower() not in {"0", "false", "no", "off"}
-USE_ORTOOLS = os.getenv("MY_AGENT_USE_ORTOOLS", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 

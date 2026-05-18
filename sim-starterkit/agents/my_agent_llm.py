@@ -12,14 +12,21 @@ import os
 from typing import Any
 
 from agents.my_agent_config import (
+    LLM_AUDIT_EVERY_DAYS,
     LLM_BASE_URL,
     LLM_MAX_TOKENS,
     LLM_MODEL,
+    LLM_REASONING_EFFORT,
     LLM_TIMEOUT_SECONDS,
     USE_LLM,
     WALKOUT_PRESSURE,
 )
-from agents.my_agent_utils import make_notes, pending_by_ingredient, stock_by_ingredient
+from agents.my_agent_utils import (
+    make_notes,
+    pending_by_ingredient,
+    pending_by_ingredient_within,
+    stock_by_ingredient,
+)
 
 try:
     from openai import OpenAI
@@ -41,9 +48,15 @@ Allowed tools for your adjustments:
 - offer_daily_special: {"dish": str}
 
 Do not use set_menu or set_price. Do not add speculative orders for ingredients
-that already have a rule order today. Survival, reputation, and low walkouts are
-more important than aggressive profit. Use exact names from the observation.
-Return [] if the rule plan is good enough.
+that already have a rule order today or a pending delivery soon. Prioritize:
+1. avoid stockouts and unavailable dishes,
+2. respect delivery schedules and supplier alerts,
+3. protect reputation and walkouts,
+4. only then chase profit.
+
+The deterministic rule plan already uses EOQ-style inventory sizing. Adjust it
+only for obvious gaps, late pending orders, fresh alerts, or severe service risk.
+Use exact names from the observation. Return [] if the rule plan is good enough.
 """
 
 
@@ -80,13 +93,22 @@ def _should_consult_llm(observation: dict[str, Any], day: int) -> bool:
 
     service = observation.get("service_summary") or {}
     walkouts = WALKOUT_PRESSURE.get(service.get("walkout_band", "None"), 0)
+    stock = stock_by_ingredient(observation, min_expires_in_days=1)
+    low_fresh_stock = any(qty < 5.0 for qty in stock.values())
+    scenario_text = " ".join(str(alert) for alert in observation.get("alerts", []))
+    scenario_text += " " + str(observation.get("notes", ""))
+    stress_scenario = any(token in scenario_text.lower() for token in ("supply", "renovation", "tourist"))
+    periodic_audit = LLM_AUDIT_EVERY_DAYS > 0 and day % LLM_AUDIT_EVERY_DAYS == 0
 
     return any([
-        day == 1,
+        day <= 3,
         bool(observation.get("alerts")),
         observation.get("reputation_band") == "Poor",
         observation.get("customer_trend") == "Declining",
-        bool(service.get("dishes_unavailable_at")) and walkouts >= 2,
+        bool(service.get("dishes_unavailable_at")),
+        low_fresh_stock and bool(observation.get("pending_orders")),
+        stress_scenario and periodic_audit,
+        observation.get("day_of_week") in {"Friday", "Saturday"} and walkouts >= 1,
         float(observation.get("cash", 0)) < 4_000,
     ])
 
@@ -103,17 +125,41 @@ def _call_llm(
 ) -> list[dict[str, Any]]:
     assert OpenAI is not None
     client = OpenAI(api_key=api_key, base_url=LLM_BASE_URL, timeout=LLM_TIMEOUT_SECONDS)
-    response = client.chat.completions.create(
-        model=LLM_MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": json.dumps(_llm_payload(observation, day, rule_actions), separators=(",", ":"))},
-        ],
-        temperature=0.1,
-        max_tokens=LLM_MAX_TOKENS,
-    )
-    content = response.choices[0].message.content or "[]"
+    payload = json.dumps(_llm_payload(observation, day, rule_actions), separators=(",", ":"))
+    try:
+        response = client.responses.create(
+            model=LLM_MODEL,
+            instructions=SYSTEM_PROMPT,
+            input=payload,
+            max_output_tokens=LLM_MAX_TOKENS,
+            reasoning={"effort": LLM_REASONING_EFFORT},
+        )
+        content = _response_text(response) or "[]"
+    except Exception:
+        response = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": payload},
+            ],
+            max_completion_tokens=LLM_MAX_TOKENS,
+        )
+        content = response.choices[0].message.content or "[]"
     return _parse_json_array(content)
+
+
+def _response_text(response: Any) -> str:
+    output_text = getattr(response, "output_text", None)
+    if isinstance(output_text, str):
+        return output_text
+
+    chunks: list[str] = []
+    for item in getattr(response, "output", []) or []:
+        for content in getattr(item, "content", []) or []:
+            text = getattr(content, "text", None)
+            if isinstance(text, str):
+                chunks.append(text)
+    return "".join(chunks)
 
 
 def _llm_payload(
@@ -126,6 +172,12 @@ def _llm_payload(
     inventory = observation.get("inventory", [])
     stock = stock_by_ingredient(observation)
     pending = pending_by_ingredient(observation)
+    pending_soon = pending_by_ingredient_within(observation, 2.5)
+    rule_orders = [
+        action.get("args", {})
+        for action in rule_actions
+        if action.get("tool") == "place_order"
+    ]
 
     low_inventory = [
         {
@@ -171,9 +223,17 @@ def _llm_payload(
         "low_inventory": low_inventory,
         "stock_kg": stock,
         "pending_kg": pending,
+        "pending_soon_kg": pending_soon,
         "pending_orders": observation.get("pending_orders", []),
         "suppliers": observation.get("supplier_catalog", []),
         "recipes": recipes,
+        "rule_orders": rule_orders,
+        "decision_rules": [
+            "Check dishes_unavailable_at before proposing any action.",
+            "Do not double-order if an ingredient is already pending soon.",
+            "Prefer preventing one stockout over marginal profit gains.",
+            "Treat supplier halt/outage/delay alerts as immediate routing changes.",
+        ],
         "rule_actions": [action for action in rule_actions if action.get("tool") != "save_notes"],
     }
 
@@ -185,6 +245,8 @@ def _parse_json_array(content: str) -> list[dict[str, Any]]:
         if text.endswith("```"):
             text = text[:-3]
         text = text.strip()
+    if not text.startswith("[") and "[" in text and "]" in text:
+        text = text[text.find("["): text.rfind("]") + 1]
 
     data = json.loads(text)
     if not isinstance(data, list):
@@ -198,8 +260,19 @@ def _validate_llm_actions(
     proposed: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     menu_names = {dish["name"] for dish in observation.get("menu_book", [])}
+    menu_book = {dish["name"]: dish for dish in observation.get("menu_book", [])}
     active_menu = set(observation.get("active_menu", []))
     suppliers = {supplier["name"]: supplier for supplier in observation.get("supplier_catalog", [])}
+    service = observation.get("service_summary") or {}
+    stockout_dishes = set((service.get("dishes_unavailable_at") or {}).keys())
+    stockout_ingredient_names = {
+        ingredient["ingredient"]
+        for dish_name in stockout_dishes
+        for ingredient in menu_book.get(dish_name, {}).get("ingredients", [])
+    }
+    already_pending = pending_by_ingredient_within(observation, 4.0)
+    rule_staff = _effective_staff_level(observation, rule_actions)
+    walkouts = WALKOUT_PRESSURE.get(service.get("walkout_band", "None"), 0)
     already_ordered = {
         action.get("args", {}).get("ingredient")
         for action in rule_actions
@@ -218,12 +291,16 @@ def _validate_llm_actions(
 
         if tool == "set_staff_level":
             level = _as_int(args.get("level"))
-            if level is not None and 5 <= level <= 12:
+            if level is not None and 5 <= level <= 12 and level >= rule_staff - 1:
+                if walkouts >= 2 and level < rule_staff:
+                    continue
                 accepted.append({"tool": tool, "args": {"level": level}})
 
         elif tool == "set_marketing_spend":
             amount = _as_float(args.get("amount"))
             if amount is not None and 0 <= amount <= 250:
+                if stockout_dishes and amount > 0:
+                    continue
                 accepted.append({"tool": tool, "args": {"amount": round(amount, 2)}})
 
         elif tool == "run_happy_hour":
@@ -244,8 +321,12 @@ def _validate_llm_actions(
                 continue
             if ingredient in already_ordered:
                 continue
+            if ingredient in already_pending and ingredient not in stockout_ingredient_names:
+                continue
             min_order = float(supplier.get("min_order_kg") or 0)
             if qty < min_order:
+                continue
+            if qty > 45 and ingredient not in stockout_ingredient_names:
                 continue
             cost = qty * float(supplier["ingredients"][ingredient])
             if order_spend + cost > order_budget:

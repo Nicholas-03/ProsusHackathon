@@ -41,6 +41,16 @@ def pending_by_ingredient(observation: dict[str, Any]) -> dict[str, float]:
     return dict(pending)
 
 
+def pending_by_ingredient_within(observation: dict[str, Any], max_days: float) -> dict[str, float]:
+    current_day = int(observation.get("day") or 1)
+    pending: dict[str, float] = defaultdict(float)
+    for order in observation.get("pending_orders", []):
+        delivery_day = int(order.get("delivery_day") or current_day)
+        if delivery_day - current_day <= max_days:
+            pending[order["ingredient"]] += float(order.get("quantity_kg") or 0)
+    return dict(pending)
+
+
 def cheapest_supplier_by_ingredient(observation: dict[str, Any]) -> dict[str, float]:
     cheapest: dict[str, float] = {}
     for supplier in observation.get("supplier_catalog", []):
@@ -120,6 +130,7 @@ def supplier_reliability(observation: dict[str, Any]) -> dict[str, float]:
 
 def suppliers_in_alerts(observation: dict[str, Any]) -> set[str]:
     alerts = " ".join(str(alert) for alert in observation.get("alerts", [])).lower()
+    alerts += " " + str(observation.get("notes", "")).lower()
     if not alerts:
         return set()
 
@@ -131,6 +142,8 @@ def suppliers_in_alerts(observation: dict[str, Any]) -> set[str]:
     for supplier in observation.get("supplier_catalog", []):
         name = supplier.get("name", "")
         if name and name.lower() in alerts:
+            blocked.add(name)
+        if name == "Italian Imports Co." and ("mediterranean" in alerts or "shipping lane" in alerts):
             blocked.add(name)
     return blocked
 

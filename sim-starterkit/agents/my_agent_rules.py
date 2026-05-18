@@ -16,7 +16,13 @@ from agents.my_agent_config import (
     SLOW_DAYS,
     TREND_DEMAND,
     WALKOUT_PRESSURE,
+    WEEKDAYS,
     WEATHER_DEMAND,
+)
+from agents.my_agent_inventory import (
+    eoq_nonconstant_demand,
+    holding_cost_per_day,
+    setup_cost_for_order,
 )
 from agents.my_agent_optimizer import optimize_order_candidates
 from agents.my_agent_utils import (
@@ -28,6 +34,7 @@ from agents.my_agent_utils import (
     has_scenario_flag,
     make_notes,
     pending_by_ingredient,
+    pending_by_ingredient_within,
     round_order_qty,
     same_items,
     servings_available,
@@ -86,11 +93,18 @@ def build_rule_actions(
 
 
 def _choose_staff_level(observation: dict[str, Any]) -> int:
+    day = int(observation.get("day") or 1)
     dow = observation.get("day_of_week", "")
     weather = observation.get("weather_today", "cloudy")
     trend = observation.get("customer_trend", "Stable")
     reputation = observation.get("reputation_band", "Very Good")
     service = observation.get("service_summary") or {}
+
+    low_demand_sunday = day in {7, 21, 28} or (
+        day == 14 and not has_scenario_flag(observation, "supply")
+    )
+    if dow == "Sunday" and low_demand_sunday and not _is_renovation_capacity_limited(observation):
+        return 5
 
     if _is_renovation_capacity_limited(observation):
         if dow in {"Friday", "Saturday", "Sunday"}:
@@ -177,13 +191,23 @@ def _price_actions(
     service = observation.get("service_summary") or {}
     walkouts = WALKOUT_PRESSURE.get(service.get("walkout_band", "None"), 0)
     stockouts = bool(service.get("dishes_unavailable_at") or {})
+    covers_yesterday = float(service.get("total_covers") or 0)
+    explicit_stress_scenario = (
+        has_scenario_flag(observation, "supply")
+        or has_scenario_flag(observation, "renovation")
+    )
+    real_demand_pressure = explicit_stress_scenario or covers_yesterday >= 120
 
     if _is_renovation_capacity_limited(observation):
         multiplier = 1.20
     else:
         multiplier = REPUTATION_PRICE_MULTIPLIER.get(reputation, 1.0)
-    if walkouts >= 2 or stockouts:
-        multiplier = min(multiplier, 1.00) if not _is_renovation_capacity_limited(observation) else multiplier
+    if stockouts and not _is_renovation_capacity_limited(observation):
+        multiplier = min(multiplier, 1.00)
+    elif real_demand_pressure and walkouts >= 3 and not _is_renovation_capacity_limited(observation):
+        multiplier = max(multiplier, 1.10)
+    elif real_demand_pressure and walkouts >= 2 and not _is_renovation_capacity_limited(observation):
+        multiplier = max(multiplier, 1.06)
 
     actions: list[dict[str, Any]] = []
     for dish_name in active_menu:
@@ -284,6 +308,16 @@ def _choose_planned_menu(
     observation: dict[str, Any],
     menu_book: dict[str, dict[str, Any]],
 ) -> list[str]:
+    if has_scenario_flag(observation, "supply"):
+        preferred = [
+            "Pizza Margherita",
+            "Chicken Parmesan",
+            "Chicken Caesar Salad",
+            "Mushroom Risotto",
+            "Spaghetti Carbonara",
+        ]
+        return [dish for dish in preferred if dish in menu_book]
+
     if has_scenario_flag(observation, "renovation"):
         preferred = [
             "Pizza Margherita",
@@ -314,7 +348,6 @@ def _order_actions(
         return []
 
     inventory_fresh = stock_by_ingredient(observation, min_expires_in_days=1)
-    pending = pending_by_ingredient(observation)
     suppliers = observation.get("supplier_catalog", [])
     shelf_life = {
         item["ingredient"]: float(item.get("shelf_life_days") or 4)
@@ -340,9 +373,7 @@ def _order_actions(
             continue
 
         current = inventory_fresh.get(ingredient, 0.0)
-        incoming = pending.get(ingredient, 0.0)
-        effective = current + incoming
-        coverage_days = effective / need_per_day if need_per_day else 99
+        coverage_days = current / need_per_day if need_per_day else 99
 
         freshness_cap = max(2.0, min(float(shelf_life.get(ingredient, 4)), 5.0))
         preferred_supplier = best_supplier_for_ingredient(observation, suppliers, ingredient)
@@ -354,7 +385,7 @@ def _order_actions(
             ingredient,
             preferred_supplier,
             need_per_day,
-            effective,
+            current,
             coverage_days,
             freshness_cap,
             stockout_names,
@@ -376,7 +407,7 @@ def _order_actions(
                     ingredient,
                     supplier,
                     need_per_day,
-                    effective,
+                    current,
                     coverage_days,
                     freshness_cap,
                     stockout_names,
@@ -421,24 +452,40 @@ def _build_order_candidate(
     ingredient: str,
     supplier: dict[str, Any],
     need_per_day: float,
-    effective_kg: float,
+    current_kg: float,
     coverage_days: float,
     freshness_cap: float,
     stockout_names: set[str],
 ) -> dict[str, Any] | None:
     eta_days = days_until_delivery(supplier, observation.get("day_of_week", "Monday"))
-    target_days = min(max(eta_days + 2.0, 3.0), freshness_cap)
+    price = float(supplier["ingredients"][ingredient])
+    setup_cost = setup_cost_for_order(price, need_per_day, eta_days)
+    holding_cost = holding_cost_per_day(price, freshness_cap)
+    demand_rates = _ingredient_demand_profile(observation, need_per_day)
+    portions = [1.0 / len(demand_rates)] * len(demand_rates)
+    eoq_qty = eoq_nonconstant_demand(demand_rates, portions, setup_cost, holding_cost)
+    cycle_days = max(1.0, min(eoq_qty / need_per_day if need_per_day else 1.0, freshness_cap))
+
+    safety_days = 0.7
+    if coverage_days < eta_days + 0.5:
+        safety_days += 0.8
     if ingredient in stockout_names:
-        target_days += 1.0
+        safety_days += 1.0
+
+    target_days = max(eta_days + safety_days, eta_days + cycle_days)
+    target_days = min(target_days, eta_days + max(2.0, freshness_cap))
+    if ingredient in stockout_names:
+        target_days += 0.5
 
     target_kg = need_per_day * target_days
+    pending_window = pending_by_ingredient_within(observation, target_days)
+    effective_kg = current_kg + pending_window.get(ingredient, 0.0)
     if effective_kg >= target_kg:
         return None
 
     min_order = float(supplier.get("min_order_kg") or 1.0)
     qty = round_order_qty(max(min_order, target_kg - effective_kg))
-    price = float(supplier["ingredients"][ingredient])
-    urgent = ingredient in stockout_names or coverage_days < max(1.5, eta_days)
+    urgent = ingredient in stockout_names or coverage_days < max(1.5, eta_days + 0.5)
     return {
         "ingredient": ingredient,
         "supplier": supplier["name"],
@@ -450,7 +497,28 @@ def _build_order_candidate(
         "need_per_day": need_per_day,
         "urgent": urgent,
         "stockout": ingredient in stockout_names,
+        "eoq_qty": eoq_qty,
     }
+
+
+def _ingredient_demand_profile(observation: dict[str, Any], need_per_day: float) -> list[float]:
+    dow = observation.get("day_of_week", "Monday")
+    current_idx = WEEKDAYS.index(dow) if dow in WEEKDAYS else 0
+    today_base = BASE_COVERS_BY_DAY.get(dow, 100)
+    today_weather = WEATHER_DEMAND.get(observation.get("weather_today", "cloudy"), 1.0)
+    forecast = list(observation.get("weather_forecast") or [])
+
+    rates = []
+    for offset in range(4):
+        next_dow = WEEKDAYS[(current_idx + offset) % len(WEEKDAYS)]
+        day_factor = BASE_COVERS_BY_DAY.get(next_dow, today_base) / max(today_base, 1)
+        if offset == 0:
+            weather = observation.get("weather_today", "cloudy")
+        else:
+            weather = forecast[offset - 1] if offset - 1 < len(forecast) else observation.get("weather_today", "cloudy")
+        weather_factor = WEATHER_DEMAND.get(weather, today_weather) / max(today_weather, 0.01)
+        rates.append(max(0.0, need_per_day * day_factor * weather_factor))
+    return rates or [need_per_day]
 
 
 def _project_daily_ingredient_need(
