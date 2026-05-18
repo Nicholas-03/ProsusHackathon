@@ -12,11 +12,17 @@ LLM_BASE_URL = (
     or os.getenv("AGENT_OPENAI_BASE_URL")
     or "https://api.openai.com/v1"
 )
-LLM_TIMEOUT_SECONDS = float(os.getenv("MY_AGENT_LLM_TIMEOUT_SECONDS", "6"))
-LLM_MAX_TOKENS = int(os.getenv("MY_AGENT_LLM_MAX_TOKENS", "1200"))
-LLM_REASONING_EFFORT = os.getenv("MY_AGENT_LLM_REASONING_EFFORT", "medium")
+LLM_TIMEOUT_SECONDS = float(os.getenv("MY_AGENT_LLM_TIMEOUT_SECONDS", "22"))
+LLM_MAX_TOKENS = int(os.getenv("MY_AGENT_LLM_MAX_TOKENS", "450"))
+LLM_REASONING_EFFORT = os.getenv("MY_AGENT_LLM_REASONING_EFFORT", "low")
 LLM_AUDIT_EVERY_DAYS = int(os.getenv("MY_AGENT_LLM_AUDIT_EVERY_DAYS", "0"))
 LLM_ALLOW_CHAT_FALLBACK = os.getenv("MY_AGENT_LLM_ALLOW_CHAT_FALLBACK", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+LLM_ALLOW_ADJUSTMENTS = os.getenv("MY_AGENT_LLM_ALLOW_ADJUSTMENTS", "0").strip().lower() in {
     "1",
     "true",
     "yes",
@@ -67,3 +73,24 @@ WALKOUT_PRESSURE = {
 
 SLOW_DAYS = {"Monday", "Tuesday", "Wednesday"}
 BUSY_DAYS = {"Friday", "Saturday"}
+
+DEFAULT_SHELF_LIFE_DAYS = {
+    "Chicken": 4.0,
+    "Cream": 4.0,
+    "Flour": 14.0,
+    "Fresh Pasta": 4.0,
+    "Lettuce": 4.0,
+    "Mozzarella": 5.0,
+    "Mushrooms": 4.0,
+    "Pepperoni": 10.0,
+    "Salmon": 4.0,
+    "Tomato Sauce": 7.0,
+}
+
+SUPPLY_SHELF_LIFE_DAYS = {
+    **DEFAULT_SHELF_LIFE_DAYS,
+    "Fresh Pasta": 3.0,
+    "Lettuce": 2.0,
+    "Mushrooms": 3.0,
+    "Salmon": 2.0,
+}

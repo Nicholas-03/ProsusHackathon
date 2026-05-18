@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import json
 import os
+from json import JSONDecodeError
 from typing import Any
 
 from agents.my_agent_config import (
+    LLM_ALLOW_ADJUSTMENTS,
     LLM_ALLOW_CHAT_FALLBACK,
     LLM_AUDIT_EVERY_DAYS,
     LLM_BASE_URL,
@@ -79,6 +81,8 @@ def refine_actions_with_llm(
 
     try:
         proposed = _call_llm(observation, day, rule_actions, api_key)
+        if not LLM_ALLOW_ADJUSTMENTS:
+            return _merge_actions(observation, rule_actions, [], llm_status="checked")
         accepted = _validate_llm_actions(observation, rule_actions, proposed)
         if not accepted:
             return _merge_actions(observation, rule_actions, [], llm_status="checked")
@@ -250,7 +254,10 @@ def _parse_json_array(content: str) -> list[dict[str, Any]]:
     if not text.startswith("[") and "[" in text and "]" in text:
         text = text[text.find("["): text.rfind("]") + 1]
 
-    data = json.loads(text)
+    try:
+        data = json.loads(text)
+    except JSONDecodeError:
+        return []
     if not isinstance(data, list):
         return []
     return [item for item in data if isinstance(item, dict)]

@@ -12,8 +12,10 @@ from typing import Any
 from agents.my_agent_config import (
     BASE_COVERS_BY_DAY,
     BUSY_DAYS,
+    DEFAULT_SHELF_LIFE_DAYS,
     REPUTATION_PRICE_MULTIPLIER,
     SLOW_DAYS,
+    SUPPLY_SHELF_LIFE_DAYS,
     TREND_DEMAND,
     WALKOUT_PRESSURE,
     WEEKDAYS,
@@ -349,8 +351,12 @@ def _order_actions(
 
     inventory_fresh = stock_by_ingredient(observation, min_expires_in_days=1)
     suppliers = observation.get("supplier_catalog", [])
+    shelf_defaults = SUPPLY_SHELF_LIFE_DAYS if has_scenario_flag(observation, "supply") else DEFAULT_SHELF_LIFE_DAYS
     shelf_life = {
-        item["ingredient"]: float(item.get("shelf_life_days") or 4)
+        item["ingredient"]: max(
+            float(item.get("shelf_life_days") or 0),
+            shelf_defaults.get(item["ingredient"], 4.0),
+        )
         for item in observation.get("inventory", [])
     }
     stockout_names = stockout_ingredients(observation, menu_book)
@@ -375,7 +381,9 @@ def _order_actions(
         current = inventory_fresh.get(ingredient, 0.0)
         coverage_days = current / need_per_day if need_per_day else 99
 
-        freshness_cap = max(2.0, min(float(shelf_life.get(ingredient, 4)), 5.0))
+        life_days = float(shelf_life.get(ingredient, shelf_defaults.get(ingredient, 4.0)))
+        max_cap = 7.0 if has_scenario_flag(observation, "supply") and life_days >= 7.0 else 5.0
+        freshness_cap = max(2.0, min(life_days, max_cap))
         preferred_supplier = best_supplier_for_ingredient(observation, suppliers, ingredient)
         if not preferred_supplier:
             continue
