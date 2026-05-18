@@ -89,16 +89,28 @@ Tick budget: 30000 ms
 Names are case-sensitive
 ```
 
-Known scenarios:
+Known development scenarios:
 
 ```text
 baseline
 supply_crisis
 tourist_season
 renovation
+```
+
+Possible extra scenarios exposed by the server or fallback evaluator:
+
+```text
 inflation
 health_scare
-hidden scenarios may exist during final evaluation
+```
+
+Final evaluation expectation:
+
+```text
+10 scenarios x 3 seeds = 30 games per team
+6 of the 10 final scenarios may be hidden
+do not assume final scenario names
 ```
 
 Known critical observation fields:
@@ -166,6 +178,8 @@ observation
 
 The agent must be robust under hidden scenarios. Do not overfit to one seed or one known scenario.
 
+Practical priority: build a small, hard-to-break deterministic controller first. Inventory, staffing, supplier timing, pending orders, stockouts, and cash reserve discipline matter more than a large architecture that is only partially implemented. Scenario labels are useful diagnostics, but final decisions should be driven mainly by observable symptoms such as stockout risk, service pressure, delivery failures, demand drift, reputation drift, and cash risk.
+
 ---
 
 ## Technology stack to use
@@ -183,57 +197,46 @@ The stack is split into four tiers:
 
 ### Required core technologies
 
-These are the technologies Codex should implement first.
+These are the only technologies Codex should require for the scoring agent. The starter kit currently installs `httpx` and `litellm`; the deterministic core must not require additional packages at import time.
 
-| Area                   | Technology                                   | Use in this project                                                         | Why it matters                                                                       |
-| ---------------------- | -------------------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| Language               | **Python 3.11 or 3.12**                | Entire agent implementation                                                 | Matches starter kit, fast iteration, strong optimization/data ecosystem              |
-| Package/env management | **venv + pip**                         | Simple VM setup                                                             | Lowest friction for hackathon and evaluator compatibility                            |
-| HTTP client            | **httpx**                              | REST-bench API calls if needed directly                                     | Starter kit already uses Python HTTP patterns; supports timeouts and async if needed |
-| Data models            | **dataclasses + optional Pydantic v2** | `GameState`, `Metrics`, `RiskAssessment`, `StrategyPlan`, tool args | Strong typing and safer parsing                                                      |
-| Strict validation      | **Pydantic v2 strict mode**            | Validate model output and action args before tool calls                     | Prevent invalid actions from killing runs                                            |
-| Numeric computation    | **numpy**                              | Forecasting, EMAs, scoring                                                  | Lightweight math                                                                     |
-| Data analysis          | **pandas**                             | Offline analysis of JSONL logs and evaluation results                       | Useful for tuning across scenarios/seeds                                             |
-| Testing                | **pytest**                             | Unit tests and smoke tests                                                  | Prevent regressions in validators and inventory logic                                |
-| Retries/timeouts       | **tenacity**                           | Optional API/LLM retries                                                    | Avoid transient failures                                                             |
-| Config                 | **python-dotenv**                      | `.env` config on VM                                                       | Keeps API keys and model settings out of code                                        |
-| Logging                | **standard `logging` + JSONL**       | Daily decision logs                                                         | Debug score failures and tune strategy                                               |
-| Storage                | **SQLite** or **JSONL first**    | Store local eval history and supplier/dish analysis                         | Simple and reliable                                                                  |
-| Code quality           | **ruff**                               | Fast lint/format                                                            | Avoid style and import errors                                                        |
-| Typing                 | **mypy optional**                      | Type-check core modules                                                     | Helpful but not mandatory under time pressure                                        |
+| Area                   | Technology                              | Use in this project                                      | Why it matters                                                |
+| ---------------------- | --------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------- |
+| Language               | **Python 3.11 or 3.12**                 | Entire agent implementation                              | Matches starter kit and VM setup                              |
+| Package/env management | **venv + pip**                          | Simple VM setup                                          | Lowest friction for hackathon and evaluator compatibility     |
+| Data models            | **standard-library dataclasses**        | `GameState`, `Metrics`, `RiskAssessment`, `StrategyPlan` | Strong typing without extra runtime dependency                |
+| Parsing/serialization  | **json**                                | Notes, optional logs, LLM plan parsing                   | Already available and reliable                                |
+| Numeric computation    | **plain Python math/statistics**        | EMAs, forecasts, clamps, scoring proxies                 | Enough for online control inside `strategy`                   |
+| Validation             | **plain Python validator module**       | Validate and repair every action                         | Prevent invalid actions without relying on Pydantic           |
+| Config                 | **os.environ**                          | `RESTBENCH_URL`, `TEAM_NAME`, optional LLM flags         | No `.env` dependency required by evaluator                     |
+| Logging                | **standard `logging` + optional JSONL** | Daily decision logs                                      | Debug score failures without risking crashes                  |
+| Optional LLM           | **litellm if already configured**       | Strategic plan only                                      | Starter kit already includes it, but core must work without it |
 
 Required install line:
 
 ```bash
-pip install pydantic numpy pandas pytest tenacity python-dotenv ruff
-```
-
-If `httpx` is not already installed by the starter kit:
-
-```bash
-pip install httpx
+pip install -r requirements.txt
 ```
 
 ---
 
 ### Strongly recommended technologies
 
-These should be used if they do not slow down delivery.
+These should be used only after the deterministic controller works and survives known scenarios. They must stay optional and must not be imported unconditionally by the scoring path.
 
 | Area                  | Technology                                        | Use in this project                                          | Why                                                     |
 | --------------------- | ------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------- |
-| LLM abstraction       | **LiteLLM**                                 | Route calls to OpenAI or fallback models                     | Easy model switching, retries, fallbacks, one interface |
-| Structured LLM output | **OpenAI Structured Outputs / JSON Schema** | Force the LLM planner to emit `StrategyPlan` JSON          | Prevent malformed LLM plans                             |
-| Optimizer             | **Google OR-Tools**                         | Budget-constrained inventory ordering and supplier selection | Good fit for constrained optimization                   |
-| Offline analytics     | **DuckDB**                                  | Query JSONL/CSV evaluation logs                              | Faster than ad-hoc pandas for many eval files           |
-| Serialization         | **orjson**                                  | Faster compact JSON notes/logs                               | Helps stay under note limit                             |
-| CLI UX                | **rich**                                    | Pretty evaluation summaries locally                          | Optional but useful for hackathon debugging             |
-| Experiment tracking   | **CSV/Markdown experiment log**             | Track changes and scores                                     | Simpler than MLflow/W&B                                 |
+| Testing               | **pytest**                                        | Unit tests and smoke tests                                   | Prevent regressions in validators and inventory logic   |
+| Code quality          | **ruff**                                          | Fast lint/format                                             | Avoid style and import errors                           |
+| LLM abstraction       | **LiteLLM**                                       | Route calls to OpenAI or fallback models                     | Already aligned with starter kit                        |
+| Structured LLM output | **JSON Schema / manual enum validation**           | Force the LLM planner to emit `StrategyPlan` JSON            | Prevent malformed LLM plans                             |
+| Offline analytics     | **pandas or DuckDB**                              | Query JSONL/CSV evaluation logs                              | Useful for tuning, not needed in `strategy`             |
+| Serialization         | **orjson**                                        | Faster compact JSON notes/logs                               | Optional; stdlib `json` is sufficient                   |
+| Experiment tracking   | **CSV/Markdown experiment log**                   | Track changes and scores                                     | Simpler than MLflow/W&B                                 |
 
-Recommended install line:
+Recommended development install line:
 
 ```bash
-pip install litellm ortools duckdb orjson rich
+pip install pytest ruff pandas duckdb orjson
 ```
 
 ---
@@ -305,11 +308,10 @@ sudo usermod -aG docker "$USER"
 Use:
 
 ```text
-numpy
-pandas
-Pydantic validation
+plain Python math and rolling metrics
+plain Python action validation
 optional contextual bandit implemented in plain Python
-optional scipy/optuna for offline tuning
+optional pandas/scipy/optuna only for offline tuning
 ```
 
 Do not start with deep reinforcement learning.
@@ -329,10 +331,8 @@ Best implementation:
 Use:
 
 ```text
-numpy
-simple forecasting heuristics
+plain Python forecasting heuristics
 optional scikit-learn after collecting logs
-optional OR-Tools if staffing is jointly optimized with cash/inventory
 ```
 
 Best implementation:
@@ -349,10 +349,10 @@ Best implementation:
 Use:
 
 ```text
-numpy
-OR-Tools optional but recommended
-Pydantic validators
+plain Python greedy ordering by criticality / cost
+plain Python validators
 supplier calendar functions
+OR-Tools optional only after the greedy version is stable
 ```
 
 Best implementation:
@@ -364,7 +364,7 @@ Best implementation:
 - budget-constrained order selection
 ```
 
-OR-Tools formulation can be used as a 0/1 or mixed-integer problem:
+Optional OR-Tools formulation can be used as a 0/1 or mixed-integer problem after the greedy version is stable:
 
 ```text
 maximize sum(criticality_i * selected_order_i)
@@ -374,7 +374,7 @@ subject to minimum order quantities
 subject to not duplicating pending orders
 ```
 
-If OR-Tools takes too long or is unavailable, fallback to greedy ordering by criticality / cost.
+The scoring agent must always have a greedy fallback by criticality / cost and must not require OR-Tools.
 
 #### 4. Supplier management
 
@@ -419,7 +419,7 @@ Use:
 ```text
 mode-based finite-state controller
 optional LLM planner
-OpenAI Structured Outputs or Pydantic schema validation
+manual JSON Schema / enum validation
 LiteLLM for model routing
 OpenAI Agents SDK or LangGraph only if helpful
 ```
@@ -470,7 +470,7 @@ LLM guardrails:
 ```text
 - LLM never emits tool calls.
 - LLM returns only StrategyPlan JSON.
-- Pydantic validates the plan.
+- Manual JSON parsing and enum validation validates the plan; Pydantic is optional.
 - Invalid/missing plan falls back to deterministic mode.
 - Hard validator still checks final actions.
 ```
@@ -557,28 +557,27 @@ LOG_LEVEL=INFO
 
 ---
 
-### Suggested `requirements-hybrid.txt`
+### Optional `requirements-hybrid.txt`
 
-Create this file:
+Create this file only for development and offline tuning. The submitted agent must still run after only `pip install -r requirements.txt`; optional packages must be imported lazily inside optional code paths.
 
 ```text
-pydantic>=2.7
-numpy>=1.26
-pandas>=2.2
 pytest>=8.0
-tenacity>=8.2
-python-dotenv>=1.0
 ruff>=0.5
-orjson>=3.10
-rich>=13.7
+pandas>=2.2
 duckdb>=1.0
-litellm>=1.0
-ortools>=9.9
+orjson>=3.10
 ```
 
 Optional extras:
 
 ```text
+pydantic>=2.7
+numpy>=1.26
+tenacity>=8.2
+python-dotenv>=1.0
+rich>=13.7
+ortools>=9.9
 openai-agents
 langgraph
 scikit-learn
@@ -586,7 +585,7 @@ scipy
 optuna
 ```
 
-Do not make optional extras mandatory for the evaluator.
+Do not make optional extras mandatory for the evaluator or import them at module import time.
 
 ---
 
@@ -595,13 +594,13 @@ Do not make optional extras mandatory for the evaluator.
 Codex should implement technologies in this order:
 
 ```text
-1. Python dataclasses / Pydantic-compatible models
+1. Python dataclasses / stdlib-only models
 2. deterministic modules
 3. validator and repair layer
 4. JSONL logging
 5. pytest tests
 6. LiteLLM optional planner
-7. OR-Tools greedy fallback optimizer
+7. greedy budget-constrained inventory optimizer
 8. Docker/Compose packaging
 9. OpenAI Agents SDK or LangGraph only if there is time
 ```
@@ -614,7 +613,7 @@ Very high:
 - cash reserve
 - inventory optimizer
 - supplier reliability
-- scenario detection
+- symptom-based risk detection
 - save_notes memory
 
 High:
@@ -625,6 +624,7 @@ High:
 
 Medium:
 - LiteLLM strategic planner
+- scenario labels as diagnostics
 - OR-Tools optimization
 - DuckDB offline analysis
 
@@ -683,6 +683,8 @@ def strategy(observation: dict, day: int) -> list[dict]:
 - Keep the agent deterministic when no LLM API key is configured.
 - Make LLM usage optional and safe.
 - Make sure the agent can run under the 30-second tick budget.
+- Keep the deterministic scoring path standard-library first; any extra package must be optional and lazily imported.
+- Wrap `strategy()` in a top-level fail-safe so unexpected errors return a minimal valid action list instead of crashing the game.
 - Add tests for validators and core logic.
 - Add JSONL logging if possible, but do not require it for scoring.
 
@@ -775,45 +777,46 @@ from .inventory import make_inventory_actions
 from .suppliers import update_supplier_memory
 from .satisfaction import make_satisfaction_actions
 from .menu import make_menu_actions
-from .validator import validate_and_repair_actions
+from .validator import make_safe_fallback_actions, validate_and_repair_actions
 
 
 def strategy(observation: dict, day: int) -> list[dict]:
-    state = parse_state(observation)
-    memory = parse_notes(observation.get("notes", ""))
+    try:
+        state = parse_state(observation)
+        memory = parse_notes(observation.get("notes", ""))
 
-    metrics = compute_metrics(state, memory)
-    memory = update_supplier_memory(state, memory)
-    risk = assess_risk(state, metrics, memory)
-    scenario = detect_scenario(state, metrics, memory)
+        metrics = compute_metrics(state, memory)
+        memory = update_supplier_memory(state, memory)
+        risk = assess_risk(state, metrics, memory)
+        scenario = detect_scenario(state, metrics, memory)
 
-    plan = make_strategy_plan(
-        state=state,
-        metrics=metrics,
-        risk=risk,
-        scenario=scenario,
-        memory=memory,
-    )
+        plan = make_strategy_plan(
+            state=state,
+            metrics=metrics,
+            risk=risk,
+            scenario=scenario,
+            memory=memory,
+        )
 
-    actions = []
-    actions.extend(make_staffing_actions(state, metrics, risk, scenario, plan))
-    actions.extend(make_menu_actions(state, metrics, risk, scenario, plan))
-    actions.extend(make_pricing_actions(state, metrics, risk, scenario, plan))
-    actions.extend(make_inventory_actions(state, metrics, risk, scenario, plan))
-    actions.extend(make_satisfaction_actions(state, metrics, risk, scenario, plan))
+        actions = []
+        actions.extend(make_staffing_actions(state, metrics, risk, scenario, plan))
+        actions.extend(make_menu_actions(state, metrics, risk, scenario, plan))
+        actions.extend(make_pricing_actions(state, metrics, risk, scenario, plan))
+        actions.extend(make_inventory_actions(state, metrics, risk, scenario, plan))
+        actions.extend(make_satisfaction_actions(state, metrics, risk, scenario, plan))
 
-    actions = validate_and_repair_actions(
-        actions=actions,
-        state=state,
-        metrics=metrics,
-        risk=risk,
-    )
+        notes_text = build_notes(state, metrics, risk, scenario, plan, memory)
+        if notes_text:
+            actions.append({"tool": "save_notes", "args": {"text": notes_text}})
 
-    notes_text = build_notes(state, metrics, risk, scenario, plan, memory)
-    if notes_text:
-        actions.append({"tool": "save_notes", "args": {"text": notes_text}})
-
-    return actions
+        return validate_and_repair_actions(
+            actions=actions,
+            state=state,
+            metrics=metrics,
+            risk=risk,
+        )
+    except Exception:
+        return make_safe_fallback_actions(observation, day)
 ```
 
 Ordering is intentional:
@@ -823,13 +826,13 @@ Ordering is intentional:
 3. Pricing before promotions.
 4. Inventory orders after cash-aware planning.
 5. Satisfaction/promotions only if service and inventory can handle extra demand.
-6. Validate everything.
+6. Validate everything, including `save_notes`.
 
 ---
 
 ## Data models
 
-Use lightweight dataclasses or Pydantic models. If Pydantic is installed, use it. If not, use dataclasses and defensive parsing.
+Use lightweight dataclasses and defensive parsing in the scoring path. Pydantic may be used in optional development tools, but the agent must not require it at import time.
 
 Recommended models:
 
@@ -1224,7 +1227,7 @@ inventory coverage far above expected usage
 
 Create `scenario.py`.
 
-The detector should infer patterns from observations, not depend only on scenario names.
+The detector should infer patterns from observations, not depend only on scenario names. Treat the label as a compact diagnostic for logs and planning, not as the main control signal. Risk modules and action modules should primarily use symptoms: stockout risk, service pressure, delivery reliability, demand drift, cost pressure, reputation drift, and cash risk.
 
 Output:
 
@@ -1263,19 +1266,19 @@ alert_text = " ".join(state.alerts).lower()
 Heuristics:
 
 ```text
-if "supplier" or "outage" or "halted" or "delivery" in alerts:
+if any(token in alert_text for token in ["supplier", "outage", "halted", "delivery"]):
     supply_shock
 
-if "tourist" or "festival" or "surge" or "visitors" in alerts:
+if any(token in alert_text for token in ["tourist", "festival", "surge", "visitors"]):
     demand_spike
 
-if "renovation" or "capacity" or "tables" in alerts:
+if any(token in alert_text for token in ["renovation", "capacity", "tables"]):
     capacity_reduction
 
-if "inflation" or "cost" or "price increase" in alerts:
+if any(token in alert_text for token in ["inflation", "cost", "price increase"]):
     inflation_or_cost_pressure
 
-if "health" or "inspection" or "illness" or "scare" in alerts:
+if any(token in alert_text for token in ["health", "inspection", "illness", "scare"]):
     health_or_reputation_shock
 ```
 
@@ -1326,6 +1329,8 @@ confidence = min(1.0, 0.25 + 0.15 * signal_count)
 ```
 
 If multiple risks are high, return `mixed_crisis`.
+
+Do not require a high-confidence scenario label before acting. If the symptoms show rising stockouts, service pressure, supplier failures, or cash stress, the corresponding action modules should respond immediately even when `scenario.label == "unknown"`.
 
 ---
 
@@ -1475,7 +1480,9 @@ kitchen_bottleneck_hours
 table_utilization_peak
 cash risk
 strategy mode
-scenario
+demand_spike_signal
+demand_weak_signal
+capacity_constrained_signal
 ```
 
 Recommended formula:
@@ -1516,11 +1523,11 @@ if kitchen_bottleneck_hours:
 if table_utilization_peak > 0.92 and predicted_covers > 100:
     target += 1
 
-if scenario.label == "demand_spike":
+if demand_spike_signal:
     target += 1
-if scenario.label == "capacity_reduction":
+if capacity_constrained_signal and service_risk not in ["high", "critical"]:
     target -= 1
-if scenario.label == "demand_drop":
+if demand_weak_signal and service_risk not in ["high", "critical"]:
     target -= 1
 
 if risk.cash_risk == "critical":
@@ -1804,7 +1811,7 @@ Weighted score by mode:
 ```python
 if mode == "survival":
     score = 0.45 * price_score + 0.25 * reliability_score + 0.30 * delivery_score
-elif scenario.label == "supply_shock":
+elif supply_pressure:
     score = 0.20 * price_score + 0.50 * reliability_score + 0.30 * delivery_score
 elif mode in ["growth", "premium", "recovery"]:
     score = 0.25 * price_score + 0.45 * reliability_score + 0.30 * delivery_score
@@ -1957,6 +1964,8 @@ Create `satisfaction.py`.
 
 Maintain reputation, reduce walkouts, avoid customer decline, and improve final score quality components.
 
+The default promotion posture is conservative. Demand-generating actions can turn a manageable day into a stockout or walkout day, so marketing and happy hour must pass a strict gate. Daily specials are safer and can be used more often.
+
 ### Root-cause diagnosis
 
 Determine dominant satisfaction issue:
@@ -2019,6 +2028,23 @@ Return:
 
 Happy hour boosts demand and discounts prices. It can help satisfaction but can worsen stockouts and overload staff.
 
+### Strict promotion gate
+
+Before any `run_happy_hour` or non-zero `set_marketing_spend`, all of these should be true:
+
+```text
+cash_risk is low or medium
+stockout_risk is low
+service_risk is low or medium
+no active dish stocked out yesterday
+critical ingredient coverage is above target after pending orders
+staff target can absorb predicted demand
+supplier/delivery alerts are not causing scarcity
+hh_streak and marketing_streak are below limits
+```
+
+If the gate fails, do not run happy hour or marketing. Prefer fixing root causes through staffing, inventory, menu simplification, supplier choice, price normalization, and a safe daily special.
+
 Use when:
 
 ```text
@@ -2042,9 +2068,9 @@ hh_streak >= 2
 Rules:
 
 ```python
-if plan.mode == "recovery" and inventory_safe and staff_safe and hh_streak == 0:
+if promotion_gate and plan.mode == "recovery" and hh_streak == 0:
     run_happy_hour
-elif scenario.label == "demand_drop" and cash_risk != "critical" and inventory_safe:
+elif promotion_gate and demand_is_weak and cash_risk != "critical":
     run_happy_hour
 else:
     no happy hour
@@ -2054,7 +2080,7 @@ else:
 
 Marketing spend range: 0-500.
 
-Use sparingly.
+Use sparingly and only after the strict promotion gate passes.
 
 Recommended amounts:
 
@@ -2194,13 +2220,24 @@ Always implement deterministic fallback.
 Mode decision:
 
 ```python
+supply_pressure = (
+    risk.stockout_risk in ["high", "critical"]
+    or "supply" in scenario.signals
+    or "delivery_failure" in scenario.signals
+)
+demand_spike = (
+    scenario.label == "demand_spike"
+    or state.customer_trend == "Growing"
+    or risk.demand_risk == "high"
+)
+
 if risk.cash_risk == "critical":
     mode = "survival"
 elif risk.reputation_risk in ["high", "critical"] or risk.service_risk in ["high", "critical"]:
     mode = "recovery"
-elif scenario.label == "supply_shock":
+elif supply_pressure:
     mode = "defensive"
-elif scenario.label == "demand_spike" and risk.cash_risk in ["low", "medium"]:
+elif demand_spike and risk.cash_risk in ["low", "medium"]:
     mode = "growth"
 elif state.reputation_band in ["Very Good", "Excellent"] and risk.cash_risk == "low":
     mode = "premium"
@@ -2210,7 +2247,7 @@ else:
     mode = "balanced"
 ```
 
-Then set intents from mode and scenario.
+Then set intents from mode, risk, and symptoms. Use `scenario.label` as a tie-breaker or explanation, not as the only trigger.
 
 ### Optional LLM strategic planner
 
@@ -2230,7 +2267,7 @@ day
 cash
 mode candidates
 risk assessment
-scenario detection
+scenario symptoms and coarse label
 service summary
 stockout signals
 supplier alerts
@@ -2305,6 +2342,16 @@ ALLOWED_TOOLS = {
 
 Drop unknown tools.
 
+### Validate notes
+
+```text
+text must be a string
+text must be <= 4000 chars
+target length should be <= 3500 chars
+```
+
+Repair by coercing to string, compacting JSON notes if possible, and truncating as a last resort.
+
 ### Validate staff
 
 ```text
@@ -2378,7 +2425,8 @@ if ingredient invalid, drop
 Before returning actions:
 
 ```python
-projected_spend = staff_delta? + marketing + ingredient_orders
+target_staff_cost = target_staff_level * state.staff_cost_per_person
+projected_spend = target_staff_cost + fixed_daily_cost + marketing + ingredient_orders
 ```
 
 Because staff/fixed costs are paid end-of-day, reserve cash:
@@ -2394,6 +2442,24 @@ If projected spend violates reserve:
 3. Reduce non-critical orders.
 4. Keep critical stockout-prevention orders.
 5. Avoid staff cuts if service risk is high; otherwise reduce staff target.
+
+### Fail-safe fallback
+
+Implement `make_safe_fallback_actions(observation, day)`.
+
+Requirements:
+
+```text
+- never raises
+- returns a list
+- uses only observation fields with `.get`
+- sets staff to a conservative level if clearly out of range or missing
+- optionally orders only obviously critical low-stock ingredients from valid suppliers within a strict cash reserve
+- optionally saves short notes if safe
+- never emits marketing, happy hour, broad menu churn, or risky price changes
+```
+
+This fallback is used only when the normal strategy path throws unexpectedly.
 
 ### De-duplication
 
@@ -2665,7 +2731,7 @@ Implementation:
 
 ```text
 - Compute risk.
-- Detect scenario.
+- Detect scenario symptoms and coarse labels.
 - Pick mode.
 - Generate actions from deterministic modules.
 - Validate/repair.
@@ -2678,12 +2744,15 @@ Acceptance criteria:
 - Survives baseline and known scenarios in most seeds.
 - Never emits invalid actions.
 - Handles missing fields.
+- Prioritizes symptom-based controls over exact scenario-name recognition.
 - Performs deterministic fallback without LLM.
 ```
 
 ---
 
 ## Scenario-specific behavior
+
+These are playbooks, not hardcoded names. In hidden evaluation, apply the playbook whenever the symptoms match, even if the scenario label is unknown or misleading.
 
 ### Baseline
 
@@ -2802,8 +2871,15 @@ Recommended bottom of `agent.py`:
 
 ```python
 if __name__ == "__main__":
+    import os
+
     from agents.runner import run_game
-    result = run_game(strategy, team_name="hybrid_operator", seed=42)
+
+    result = run_game(
+        strategy,
+        team_name=os.getenv("TEAM_NAME", "hybrid_operator"),
+        seed=42,
+    )
     print(result)
 ```
 
@@ -2847,9 +2923,8 @@ python3.11 -m venv .venv
 source .venv/bin/activate
 
 pip install -r requirements.txt
+# Optional development extras only if needed:
 pip install -r requirements-hybrid.txt
-# Optional extras only if needed:
-pip install openai-agents langgraph scikit-learn scipy optuna
 ```
 
 Environment:
@@ -2870,7 +2945,7 @@ export OPENAI_API_KEY=...
 Run:
 
 ```bash
-python -m agents.evaluate agents.hybrid_operator.agent --seeds 42,88,123 --parallel 5
+python -m agents.evaluate agents.hybrid_operator.agent --seeds 42,88,123 --parallel 5 --team-name "$TEAM_NAME"
 ```
 
 For persistent process or repeated eval scripts, use `tmux`:
@@ -2887,32 +2962,32 @@ Or create a `systemd` unit only if you build a long-running wrapper. The starter
 
 Codex should implement in this order:
 
-0. Create `requirements-hybrid.txt` with the required stack.
 1. `state.py`
 2. `memory.py`
-3. `metrics.py`
-4. `risk.py`
-5. `scenario.py`
+3. `validator.py` with `make_safe_fallback_actions`
+4. `metrics.py`
+5. `risk.py`
 6. `suppliers.py`
 7. `inventory.py`
 8. `staffing.py`
-9. `pricing.py`
-10. `satisfaction.py`
-11. `menu.py`
-12. `planner.py`
-13. `validator.py`
-14. `agent.py`
-15. Tests
+9. `planner.py`
+10. `agent.py`
+11. Focused tests for validator, memory, inventory, staffing
+12. `scenario.py` diagnostics
+13. `pricing.py`
+14. `satisfaction.py`
+15. `menu.py`
+16. Optional logging and optional LLM planner
 
 The first working version should be deterministic and not require an LLM.
 
-After that, add optional LLM planner.
+After that, add conservative pricing, strict-gated promotions, diagnostics, and finally the optional LLM planner.
 
 ---
 
 ## Minimal deterministic policy summary
 
-If time is short, implement this simplified policy:
+If time is short, implement this simplified policy before adding optional LLM planning, optimization libraries, advanced pricing, or broad promotion logic:
 
 ```text
 Every day:
@@ -2923,10 +2998,12 @@ Every day:
 5. Check stockouts and low ingredient coverage.
 6. Order critical ingredients using reliable/fast suppliers with cash reserve.
 7. Offer daily special on stocked active dish.
-8. Adjust 1-3 prices conservatively.
-9. Avoid marketing/happy hour unless inventory and service are safe.
+8. Adjust 0-2 prices conservatively only when reputation and demand signals are safe.
+9. Default to no marketing/happy hour; enable only when the strict promotion gate passes.
 10. Save compact notes.
 ```
+
+MVP rule: no bankruptcies and no invalid actions beat clever upside. Add complexity only after the agent completes known scenarios and seeds with stable scores.
 
 This should beat a naive LLM wrapper because it uses simulator-specific signals, especially:
 
@@ -2950,7 +3027,7 @@ alerts
 Use this prompt with Codex:
 
 ```text
-Implement the hybrid_operator agent described in docs/hybrid_operator_spec.md.
+Implement the hybrid_operator agent described in hybrid_restaurant_agent_codex_spec.md.
 
 Create the package agents/hybrid_operator with modules:
 agent.py, state.py, memory.py, metrics.py, risk.py, scenario.py, planner.py, pricing.py, staffing.py, inventory.py, suppliers.py, satisfaction.py, menu.py, validator.py, constants.py, logging_utils.py, prompts.py.
@@ -2970,8 +3047,12 @@ Focus on:
 - supplier calendar awareness
 - supplier reliability from delivery_history
 - dishes_unavailable_at as the highest-priority inventory signal
+- symptom-based risk controls before scenario-label recognition
 - mode-based strategy
+- strict promotion gate for marketing and happy hour
 - save_notes compact memory
+- top-level fail-safe fallback from strategy()
+- standard-library deterministic core with optional lazy imports only
 - hidden scenario robustness
 
 Add unit tests for validators, notes, delivery day calculation, inventory ordering, and staffing.
@@ -2987,7 +3068,9 @@ Before considering implementation complete:
 
 ```text
 [ ] strategy() returns a list for empty/minimal observations.
+[ ] strategy() catches unexpected exceptions and returns safe fallback actions.
 [ ] No action with unknown tool name is returned.
+[ ] Agent imports and runs after only `pip install -r requirements.txt`.
 [ ] Staff actions always use 3 <= level <= 15.
 [ ] Price actions always use 0.8x <= price/base <= 1.2x.
 [ ] Menu actions always include at least 5 valid dishes.
@@ -2998,6 +3081,7 @@ Before considering implementation complete:
 [ ] Orders account for pending_orders.
 [ ] Orders maintain cash reserve when possible.
 [ ] save_notes is <= 4000 chars.
+[ ] Marketing and happy hour are blocked unless the strict promotion gate passes.
 [ ] Agent runs without LLM credentials.
 [ ] Agent can run with optional LLM planner.
 [ ] Unit tests pass.
@@ -3052,7 +3136,7 @@ It is a robust controller with:
 - deterministic survival logic
 - strong validation
 - persistent compact memory
-- scenario detection
+- symptom-based risk detection with scenario labels as diagnostics
 - cash-aware inventory planning
 - supplier reliability tracking
 - conservative pricing optimization
