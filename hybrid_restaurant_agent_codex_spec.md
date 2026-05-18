@@ -168,6 +168,503 @@ The agent must be robust under hidden scenarios. Do not overfit to one seed or o
 
 ---
 
+## Technology stack to use
+
+This project should be implemented as a **Python-first hybrid control agent**.
+
+The stack is split into four tiers:
+
+1. **Required core stack**: must be implemented.
+2. **Strongly recommended stack**: use unless time is very limited.
+3. **Optional SOTA stack**: add only after the deterministic agent is stable.
+4. **Avoid / not worth it for this hackathon**: technologies that add complexity without likely score gain.
+
+---
+
+### Required core technologies
+
+These are the technologies Codex should implement first.
+
+| Area                   | Technology                                   | Use in this project                                                         | Why it matters                                                                       |
+| ---------------------- | -------------------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Language               | **Python 3.11 or 3.12**                | Entire agent implementation                                                 | Matches starter kit, fast iteration, strong optimization/data ecosystem              |
+| Package/env management | **venv + pip**                         | Simple VM setup                                                             | Lowest friction for hackathon and evaluator compatibility                            |
+| HTTP client            | **httpx**                              | REST-bench API calls if needed directly                                     | Starter kit already uses Python HTTP patterns; supports timeouts and async if needed |
+| Data models            | **dataclasses + optional Pydantic v2** | `GameState`, `Metrics`, `RiskAssessment`, `StrategyPlan`, tool args | Strong typing and safer parsing                                                      |
+| Strict validation      | **Pydantic v2 strict mode**            | Validate model output and action args before tool calls                     | Prevent invalid actions from killing runs                                            |
+| Numeric computation    | **numpy**                              | Forecasting, EMAs, scoring                                                  | Lightweight math                                                                     |
+| Data analysis          | **pandas**                             | Offline analysis of JSONL logs and evaluation results                       | Useful for tuning across scenarios/seeds                                             |
+| Testing                | **pytest**                             | Unit tests and smoke tests                                                  | Prevent regressions in validators and inventory logic                                |
+| Retries/timeouts       | **tenacity**                           | Optional API/LLM retries                                                    | Avoid transient failures                                                             |
+| Config                 | **python-dotenv**                      | `.env` config on VM                                                       | Keeps API keys and model settings out of code                                        |
+| Logging                | **standard `logging` + JSONL**       | Daily decision logs                                                         | Debug score failures and tune strategy                                               |
+| Storage                | **SQLite** or **JSONL first**    | Store local eval history and supplier/dish analysis                         | Simple and reliable                                                                  |
+| Code quality           | **ruff**                               | Fast lint/format                                                            | Avoid style and import errors                                                        |
+| Typing                 | **mypy optional**                      | Type-check core modules                                                     | Helpful but not mandatory under time pressure                                        |
+
+Required install line:
+
+```bash
+pip install pydantic numpy pandas pytest tenacity python-dotenv ruff
+```
+
+If `httpx` is not already installed by the starter kit:
+
+```bash
+pip install httpx
+```
+
+---
+
+### Strongly recommended technologies
+
+These should be used if they do not slow down delivery.
+
+| Area                  | Technology                                        | Use in this project                                          | Why                                                     |
+| --------------------- | ------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------- |
+| LLM abstraction       | **LiteLLM**                                 | Route calls to OpenAI or fallback models                     | Easy model switching, retries, fallbacks, one interface |
+| Structured LLM output | **OpenAI Structured Outputs / JSON Schema** | Force the LLM planner to emit `StrategyPlan` JSON          | Prevent malformed LLM plans                             |
+| Optimizer             | **Google OR-Tools**                         | Budget-constrained inventory ordering and supplier selection | Good fit for constrained optimization                   |
+| Offline analytics     | **DuckDB**                                  | Query JSONL/CSV evaluation logs                              | Faster than ad-hoc pandas for many eval files           |
+| Serialization         | **orjson**                                  | Faster compact JSON notes/logs                               | Helps stay under note limit                             |
+| CLI UX                | **rich**                                    | Pretty evaluation summaries locally                          | Optional but useful for hackathon debugging             |
+| Experiment tracking   | **CSV/Markdown experiment log**             | Track changes and scores                                     | Simpler than MLflow/W&B                                 |
+
+Recommended install line:
+
+```bash
+pip install litellm ortools duckdb orjson rich
+```
+
+---
+
+### Optional SOTA agent technologies
+
+Add these only after the deterministic agent is strong and stable.
+
+| Area                   | Technology                                     | Use                                                                  | When to use                                                   |
+| ---------------------- | ---------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------- |
+| Agent framework        | **OpenAI Agents SDK**                    | Guardrails, tracing, structured strategic planner                    | Use if you want traceable planner calls and output guardrails |
+| Agent graph runtime    | **LangGraph**                            | Explicit state graph: observe → risk → plan → modules → validate | Use if you want durable state graphs and clean orchestration  |
+| Forecasting            | **scikit-learn**                         | Ridge/RandomForest demand prediction from eval logs                  | Use after collecting enough games                             |
+| Optimization           | **scipy.optimize**                       | Lightweight continuous/discrete tuning                               | Use for quick parameter search                                |
+| Hyperparameter search  | **Optuna**                               | Tune safety stock, staff thresholds, price rules                     | Use only if simulator can run many games quickly              |
+| Monitoring             | **Prometheus + Grafana**                 | Runtime metrics dashboard                                            | Usually overkill unless the VM runs many evaluations          |
+| Distributed evaluation | **Ray**                                  | Parallel scenario/seed sweeps                                        | Use only if local evaluator parallelism is insufficient       |
+| Experiment tracking    | **MLflow** or **Weights & Biases** | Track scores and configurations                                      | Useful for teams, but not required                            |
+
+Optional install line:
+
+```bash
+pip install openai-agents langgraph scikit-learn scipy optuna
+```
+
+Only install `ray`, `mlflow`, or `wandb` if the team really needs them.
+
+---
+
+### Technologies for VM deployment
+
+Use this deployment stack on the VM:
+
+| Layer                    | Technology                                      | Purpose                                                            |
+| ------------------------ | ----------------------------------------------- | ------------------------------------------------------------------ |
+| OS                       | **Ubuntu 22.04/24.04 LTS**                | Stable Python/Docker environment                                   |
+| Process/session          | **tmux**                                  | Keep long evaluations alive over SSH                               |
+| Runtime isolation        | **venv** initially                        | Fastest setup                                                      |
+| Containerization         | **Docker**                                | Reproducible deployment after agent works                          |
+| Multi-service deployment | **Docker Compose**                        | Optional wrapper + logs + monitoring                               |
+| Secrets                  | **`.env` file + environment variables** | API keys and config                                                |
+| Long-running service     | **systemd**                               | Only if exposing a persistent agent server                         |
+| API wrapper              | **FastAPI + Uvicorn**                     | Only if the hackathon requires hosting an HTTP endpoint on your VM |
+| Reverse proxy            | **Nginx or Caddy**                        | Only if exposing FastAPI publicly                                  |
+| Logs                     | **JSONL files + logrotate**               | Keep logs bounded                                                  |
+
+The starter kit normally imports the agent module directly through the evaluator, so **FastAPI is not required** unless the organizers specifically require your VM to expose an HTTP endpoint.
+
+VM install baseline:
+
+```bash
+sudo apt update
+sudo apt install -y python3.11 python3.11-venv git tmux build-essential
+```
+
+Docker optional:
+
+```bash
+sudo apt install -y docker.io docker-compose-plugin
+sudo usermod -aG docker "$USER"
+```
+
+---
+
+### Technologies by feature
+
+#### 1. Pricing
+
+Use:
+
+```text
+numpy
+pandas
+Pydantic validation
+optional contextual bandit implemented in plain Python
+optional scipy/optuna for offline tuning
+```
+
+Do not start with deep reinforcement learning.
+
+Best implementation:
+
+```text
+- deterministic pricing rules
+- small discrete price arms
+- rolling demand/margin metrics
+- safety guards against reputation damage
+- optional Thompson Sampling or epsilon-greedy bandit
+```
+
+#### 2. Staffing
+
+Use:
+
+```text
+numpy
+simple forecasting heuristics
+optional scikit-learn after collecting logs
+optional OR-Tools if staffing is jointly optimized with cash/inventory
+```
+
+Best implementation:
+
+```text
+- forecast covers
+- map covers to staff
+- adjust for wait/walkout pressure
+- cash-aware clamps
+```
+
+#### 3. Inventory
+
+Use:
+
+```text
+numpy
+OR-Tools optional but recommended
+Pydantic validators
+supplier calendar functions
+```
+
+Best implementation:
+
+```text
+- reorder point model
+- safety stock by scenario
+- supplier delivery-calendar awareness
+- budget-constrained order selection
+```
+
+OR-Tools formulation can be used as a 0/1 or mixed-integer problem:
+
+```text
+maximize sum(criticality_i * selected_order_i)
+subject to total_order_cost <= ordering_budget
+subject to supplier/ingredient validity
+subject to minimum order quantities
+subject to not duplicating pending orders
+```
+
+If OR-Tools takes too long or is unavailable, fallback to greedy ordering by criticality / cost.
+
+#### 4. Supplier management
+
+Use:
+
+```text
+plain Python scoring
+memory via save_notes
+optional Bayesian/Beta reliability model
+optional SQLite/DuckDB for offline supplier analysis
+```
+
+Best implementation:
+
+```text
+- reliability EMA
+- alert penalty
+- price + lead time + delivery day + reliability scoring
+```
+
+#### 5. Customer satisfaction
+
+Use:
+
+```text
+rule-based root-cause classifier
+LLM strategic diagnosis optional
+structured output validation
+```
+
+Best implementation:
+
+```text
+- classify inventory issue / service issue / value issue / demand issue
+- choose daily special, happy hour, marketing only when safe
+```
+
+#### 6. Long-term strategy
+
+Use:
+
+```text
+mode-based finite-state controller
+optional LLM planner
+OpenAI Structured Outputs or Pydantic schema validation
+LiteLLM for model routing
+OpenAI Agents SDK or LangGraph only if helpful
+```
+
+Best implementation:
+
+```text
+- deterministic mode selection first
+- optional LLM StrategyPlan
+- no direct LLM tool calls
+```
+
+---
+
+### LLM technology choice
+
+Use the LLM for **strategic planning only**, not direct actions.
+
+Preferred setup:
+
+```text
+LiteLLM Router
+  primary model: strong OpenAI model for strategy
+  fallback model: cheaper/faster model
+  output: StrategyPlan JSON
+  timeout: 3-8 seconds
+  retries: 1-2
+```
+
+Environment variables:
+
+```bash
+export USE_LLM_PLANNER=false
+export AGENT_MODEL=openai/gpt-4.1-mini
+export AGENT_MODEL_FALLBACK=openai/gpt-4.1-nano
+export LLM_TIMEOUT_SECONDS=6
+export OPENAI_API_KEY=...
+```
+
+The deterministic agent must work with:
+
+```bash
+export USE_LLM_PLANNER=false
+```
+
+LLM guardrails:
+
+```text
+- LLM never emits tool calls.
+- LLM returns only StrategyPlan JSON.
+- Pydantic validates the plan.
+- Invalid/missing plan falls back to deterministic mode.
+- Hard validator still checks final actions.
+```
+
+---
+
+### OpenAI Agents SDK vs LangGraph vs plain Python
+
+Use this decision rule:
+
+```text
+Default: plain Python modules
+If you need model routing only: LiteLLM
+If you need structured planner + tracing/guardrails: OpenAI Agents SDK
+If you need explicit graph orchestration/checkpointing: LangGraph
+```
+
+Recommended for this hackathon:
+
+```text
+Phase 1: plain Python deterministic modules
+Phase 2: LiteLLM optional strategic planner
+Phase 3: OpenAI Agents SDK tracing/guardrails or LangGraph only if time remains
+```
+
+Do not rewrite the whole agent into a framework before the deterministic policy is reliable.
+
+---
+
+### Containerization files to add
+
+Codex should add these only after the Python module works.
+
+#### `Dockerfile`
+
+```dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential git curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python", "-m", "agents.evaluate", "agents.hybrid_operator.agent", "--seeds", "42,88,123", "--parallel", "5"]
+```
+
+#### `docker-compose.yml`
+
+```yaml
+services:
+  hybrid-agent:
+    build: .
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+      - ./eval_results:/app/eval_results
+    command: >
+      python -m agents.evaluate agents.hybrid_operator.agent
+      --seeds 42,88,123
+      --parallel 5
+```
+
+#### `.env.example`
+
+```bash
+RESTBENCH_URL=http://52.48.183.209:8001
+TEAM_NAME=YOUR_TEAM_NAME
+USE_LLM_PLANNER=false
+AGENT_MODEL=openai/gpt-4.1-mini
+AGENT_MODEL_FALLBACK=openai/gpt-4.1-nano
+LLM_TIMEOUT_SECONDS=6
+OPENAI_API_KEY=
+LOG_LEVEL=INFO
+```
+
+---
+
+### Suggested `requirements-hybrid.txt`
+
+Create this file:
+
+```text
+pydantic>=2.7
+numpy>=1.26
+pandas>=2.2
+pytest>=8.0
+tenacity>=8.2
+python-dotenv>=1.0
+ruff>=0.5
+orjson>=3.10
+rich>=13.7
+duckdb>=1.0
+litellm>=1.0
+ortools>=9.9
+```
+
+Optional extras:
+
+```text
+openai-agents
+langgraph
+scikit-learn
+scipy
+optuna
+```
+
+Do not make optional extras mandatory for the evaluator.
+
+---
+
+### Technology priority order
+
+Codex should implement technologies in this order:
+
+```text
+1. Python dataclasses / Pydantic-compatible models
+2. deterministic modules
+3. validator and repair layer
+4. JSONL logging
+5. pytest tests
+6. LiteLLM optional planner
+7. OR-Tools greedy fallback optimizer
+8. Docker/Compose packaging
+9. OpenAI Agents SDK or LangGraph only if there is time
+```
+
+Score impact estimate:
+
+```text
+Very high:
+- validators
+- cash reserve
+- inventory optimizer
+- supplier reliability
+- scenario detection
+- save_notes memory
+
+High:
+- pricing heuristics
+- staffing forecast
+- root-cause satisfaction recovery
+- JSONL logs for tuning
+
+Medium:
+- LiteLLM strategic planner
+- OR-Tools optimization
+- DuckDB offline analysis
+
+Low unless time remains:
+- full LangGraph rewrite
+- OpenAI Agents SDK multi-agent architecture
+- MLflow/W&B
+- Prometheus/Grafana
+- Ray
+```
+
+---
+
+### Technologies to avoid initially
+
+Avoid these in the first implementation:
+
+```text
+Deep reinforcement learning
+Large multi-agent debates
+Vector databases
+RAG over static docs
+Kubernetes
+Complex microservices
+Heavy dashboards
+Fine-tuning
+End-to-end neural forecasting
+Always-on LLM for every action
+```
+
+Reason:
+
+```text
+The simulator is short horizon, constrained, and risk-heavy.
+Invalid actions, stockouts, cash collapse, and poor supplier choices matter more than fancy architecture.
+A robust deterministic controller with optional LLM strategy is the best engineering tradeoff.
+```
+
+---
+
 ## Implementation constraints for Codex
 
 ### Do
@@ -2350,9 +2847,9 @@ python3.11 -m venv .venv
 source .venv/bin/activate
 
 pip install -r requirements.txt
-pip install pydantic pandas numpy tenacity pytest
-# Optional:
-pip install litellm ortools
+pip install -r requirements-hybrid.txt
+# Optional extras only if needed:
+pip install openai-agents langgraph scikit-learn scipy optuna
 ```
 
 Environment:
@@ -2390,6 +2887,7 @@ Or create a `systemd` unit only if you build a long-running wrapper. The starter
 
 Codex should implement in this order:
 
+0. Create `requirements-hybrid.txt` with the required stack.
 1. `state.py`
 2. `memory.py`
 3. `metrics.py`
